@@ -1,0 +1,17 @@
+# BenscriptAI - AI-Enhanced Trading Bot
+# Install with: pip install -r requirements.txt
+
+# Core trading
+ccxt>=4.0.0
+pandas>=2.0.0
+ta>=0.10.0
+python-dotenv>=1.0.0
+
+# AI Integration (Gemini - FREE tier available!)
+google-generativeai>=0.8.0
+
+# Telegram Bot
+python-telegram-bot>=20.0
+
+# Async support
+aiohttp>=3.8.0
