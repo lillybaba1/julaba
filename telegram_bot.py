@@ -755,13 +755,17 @@ Example: `/aimode advisory`""",
         if self.chat_with_ai:
             try:
                 response = await self.chat_with_ai(user_message, context_info)
-                await update.message.reply_text(response, parse_mode="Markdown")
+                # Escape special markdown characters to prevent parsing errors
+                # Keep basic formatting but escape problematic characters
+                safe_response = response.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
+                await update.message.reply_text(safe_response, parse_mode="Markdown")
             except Exception as e:
                 logger.error(f"AI chat error: {e}")
-                await update.message.reply_text(
-                    "🤖 Sorry, I had trouble processing that. Try asking again or use /help to see available commands.",
-                    parse_mode="Markdown"
-                )
+                # Try sending without markdown if it fails
+                try:
+                    await update.message.reply_text(response or "🤖 Sorry, I had trouble processing that.")
+                except:
+                    await update.message.reply_text("🤖 Sorry, I had trouble processing that. Try asking again or use /help.")
         else:
             # Fallback if AI not available
             await update.message.reply_text(

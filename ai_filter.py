@@ -62,8 +62,8 @@ class AISignalFilter:
             try:
                 import google.generativeai as genai
                 genai.configure(api_key=self.api_key)
-                self.model = genai.GenerativeModel('gemini-3-pro-preview')
-                logger.info("Gemini 3 Pro AI filter initialized")
+                self.model = genai.GenerativeModel('gemini-2.5-flash')
+                logger.info("Gemini 2.5 Flash AI filter initialized (fast mode)")
             except Exception as e:
                 logger.warning(f"Failed to initialize Gemini: {e}")
                 self.use_ai = False
