@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.log
+.env
+chat_history.json
+ai_history.json
+trade_history.json
+.DS_Store
