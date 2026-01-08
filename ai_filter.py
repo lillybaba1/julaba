@@ -591,7 +591,7 @@ Respond ONLY with valid JSON, no other text:"""
             if self.chat_history:
                 history_text = "\n\nRecent Conversation History:\n"
                 for msg in self.chat_history[-10:]:  # Last 10 exchanges
-                    role = "Silla" if msg["role"] == "user" else "Julaba"
+                    role = "User" if msg["role"] == "user" else "Benscript"
                     history_text += f"{role}: {msg['content']}\n"
             
             # Build trade performance summary
@@ -604,8 +604,8 @@ Respond ONLY with valid JSON, no other text:"""
                 elif self.consecutive_losses > 0:
                     trade_summary += f" | Current streak: {self.consecutive_losses} losses 📉"
             
-            prompt = f"""You are Julaba, a smart, enthusiastic, and proactive crypto trading assistant bot.
-Your owner is Silla. You are loyal, eager to help, and always ready with market insights.
+            prompt = f"""You are Benscript, a smart, enthusiastic, and proactive crypto trading assistant bot.
+You are helpful, eager to assist, and always ready with market insights.
 {trade_summary}
 
 CURRENT SYSTEM STATUS:
@@ -641,7 +641,7 @@ ALWAYS DO THIS:
 - If asked to trade, either confirm it worked (if ✅ appears) or guide them how to do it
 - Be the best trading assistant Silla could ask for!
 
-Respond as Julaba:"""
+Respond as Benscript:"""
 
             response = self.model.generate_content(prompt)
             ai_response = response.text.strip()
@@ -668,7 +668,7 @@ Respond as Julaba:"""
         message_lower = message.lower()
         
         if any(word in message_lower for word in ["hello", "hi", "hey", "sup"]):
-            return "👋 Hey there! I'm Julaba, your trading assistant. How can I help you today?"
+            return "👋 Hey there! I'm Benscript, your trading assistant. How can I help you today?"
         
         if any(word in message_lower for word in ["how are you", "how's it going"]):
             return "🤖 I'm running smoothly and watching the markets! How can I help you?"

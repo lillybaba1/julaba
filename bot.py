@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Julaba - AI-Enhanced Crypto Trading Bot
+Benscript - AI-Enhanced Crypto Trading Bot
 Combines the original trading strategy with AI signal filtering and Telegram notifications.
 """
 
@@ -24,7 +24,7 @@ load_dotenv()
 def setup_logging(log_level: str = "INFO") -> None:
     """Setup logging to both console and file."""
     log_dir = Path(__file__).parent
-    log_file = log_dir / "julaba.log"
+    log_file = log_dir / "benscript.log"
     
     formatter = logging.Formatter(
         "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -50,7 +50,7 @@ def setup_logging(log_level: str = "INFO") -> None:
     logging.info("="*60)
     logging.info("Log file: %s", log_file)
 
-logger = logging.getLogger("Julaba")
+logger = logging.getLogger("Benscript")
 
 # Import ccxt
 try:
@@ -123,7 +123,7 @@ class TradeStats:
 
 # ============== Main Bot Class ==============
 
-class Julaba:
+class Benscript:
     """
     AI-Enhanced Trading Bot with Telegram Integration.
     """
@@ -198,7 +198,7 @@ class Julaba:
         # Control
         self.running = False
         
-        logger.info(f"Julaba initialized | Paper: {self.paper_mode} | Balance: ${self.balance:,.2f}")
+        logger.info(f"Benscript initialized | Paper: {self.paper_mode} | Balance: ${self.balance:,.2f}")
     
     def _setup_telegram_callbacks(self):
         """Setup callbacks for Telegram commands."""
@@ -983,7 +983,7 @@ class Julaba:
         self.running = False
         
         if self.telegram.enabled:
-            await self.telegram.send_message("🛑 *Julaba Bot Stopped*")
+            await self.telegram.send_message("🛑 *Benscript Bot Stopped*")
             await self.telegram.stop()
         
         if self.exchange:
@@ -996,7 +996,7 @@ class Julaba:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Julaba - AI-Enhanced Crypto Trading Bot"
+        description="Benscript - AI-Enhanced Crypto Trading Bot"
     )
     parser.add_argument(
         "--paper-balance",
@@ -1028,7 +1028,7 @@ def main():
     # Setup file logging before anything else
     setup_logging(args.log_level)
     
-    bot = Julaba(
+    bot = Benscript(
         paper_balance=args.paper_balance,
         ai_confidence=args.ai_confidence,
         ai_mode=args.ai_mode,

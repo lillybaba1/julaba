@@ -1,4 +1,4 @@
-# Julaba - AI-Enhanced Crypto Trading Bot
+# Benscript - AI-Enhanced Crypto Trading Bot
 
 Automated trading bot for MEXC exchange with AI signal filtering using Google Gemini and Telegram notifications.
 
@@ -34,7 +34,7 @@ brew install python@3.11
 ### 2. Clone or Extract the Project
 
 ```bash
-cd ~/Downloads/julaba
+cd ~/Downloads/benscript
 # Or extract the ZIP file you received
 ```
 
@@ -235,12 +235,12 @@ pip install -r requirements.txt
 ## 📁 Project Structure
 
 ```
-julaba/
+benscript/
 ├── bot.py                 # Main bot entry point
 ├── ai_filter.py          # AI signal filtering
 ├── telegram_bot.py       # Telegram integration
 ├── indicator.py          # Technical indicators
-├── julaba_reader.py      # Data reader
+├── benscript_reader.py      # Data reader
 ├── requirements.txt      # Python dependencies
 ├── .env                  # Your configuration (DO NOT SHARE)
 ├── .env.example          # Example configuration
@@ -249,12 +249,12 @@ julaba/
 
 ## 📝 Logs
 
-Logs are saved to `julaba.log` in the project directory. Use `tail -f julaba.log` to monitor in real-time.
+Logs are saved to `benscript.log` in the project directory. Use `tail -f benscript.log` to monitor in real-time.
 
 ## 🤝 Support
 
 If you encounter issues:
-1. Check the logs (`julaba.log`)
+1. Check the logs (`benscript.log`)
 2. Verify all API keys are correct
 3. Ensure you're using Python 3.11+
 4. Try paper trading mode first

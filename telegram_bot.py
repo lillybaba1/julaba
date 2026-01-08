@@ -1,5 +1,5 @@
 """
-Telegram Bot for Julaba Trading System
+Telegram Bot for Benscript Trading System
 Provides real-time notifications and interactive commands.
 """
 
@@ -128,7 +128,7 @@ class TelegramNotifier:
         )
         
         logger.info("Telegram bot started - listening for commands")
-        await self.send_message("🤖 *Julaba Bot Started*\n\nType /help for commands")
+        await self.send_message("🤖 *Benscript Bot Started*\n\nType /help for commands")
     
     async def stop(self):
         """Stop the Telegram bot."""
@@ -321,7 +321,7 @@ Use /confirm or /reject, or tap below:
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /start command."""
         await update.message.reply_text(
-            "🤖 *Julaba Trading Bot*\n\n"
+            "🤖 *Benscript Trading Bot*\n\n"
             "I'll send you real-time trading alerts and AI analysis.\n\n"
             "Use /help to see available commands.",
             parse_mode="Markdown"
@@ -330,7 +330,7 @@ Use /confirm or /reject, or tap below:
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /help command."""
         msg = """
-🤖 *Julaba Commands*
+🤖 *Benscript Commands*
 
 📊 *Info Commands:*
 /status - Bot status & connection info
@@ -381,7 +381,7 @@ Use /confirm or /reject, or tap below:
             pnl_pct = ((s.get('balance', 0) - initial) / initial * 100) if initial > 0 else 0
             
             msg = f"""
-📊 *Julaba Status*
+📊 *Benscript Status*
 
 *Connection*
 🔌 Status: {'✅ Connected' if s.get('connected') else '❌ Disconnected'}
@@ -769,7 +769,7 @@ Example: `/aimode advisory`""",
         else:
             # Fallback if AI not available
             await update.message.reply_text(
-                "🤖 Hi! I'm Julaba, your trading assistant.\n\n"
+                "🤖 Hi! I'm Benscript, your trading assistant.\n\n"
                 "Use /help to see what I can do, or ask me anything about trading!",
                 parse_mode="Markdown"
             )
