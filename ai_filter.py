@@ -48,6 +48,9 @@ class AISignalFilter:
         
         # Trading performance tracking - load from persistent storage
         self.recent_trades = []  # List of {"result": "win"/"loss", "pnl": float, "time": str}
+        self.total_wins = 0
+        self.total_losses = 0
+        self.consecutive_wins = 0
         self.consecutive_losses = 0
     
     def record_trade_result(self, is_win: bool, pnl: float):

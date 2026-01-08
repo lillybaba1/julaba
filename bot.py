@@ -138,7 +138,6 @@ class Julaba:
     """
     
     # Strategy parameters (from original)
-    SYMBOL = "LINK/USDT"
     BASE_TF = "1m"
     AGG_TF_MINUTES = 3
     ATR_PERIOD = 14
@@ -159,10 +158,15 @@ class Julaba:
         paper_balance: Optional[float] = None,
         ai_confidence: float = 0.7,
         log_level: str = "INFO",
-        ai_mode: str = "filter"  # "filter", "advisory", "autonomous", "hybrid"
+        ai_mode: str = "filter",  # "filter", "advisory", "autonomous", "hybrid"
+        symbol: str = "LINK/USDT",
+        scan_interval: int = 300
     ):
         # Set log level
         logging.getLogger().setLevel(getattr(logging, log_level.upper()))
+        
+        # Symbol (now configurable!)
+        self.SYMBOL = symbol
         
         # AI Trading Mode
         # "filter" = AI only validates technical signals (default)
@@ -172,7 +176,7 @@ class Julaba:
         self.ai_mode = ai_mode
         self.pending_ai_trade = None  # For advisory/hybrid mode confirmation
         self.last_ai_scan_time = None  # Rate limit AI scans
-        self.ai_scan_interval = 300  # 5 minutes between proactive scans
+        self.ai_scan_interval = scan_interval  # Configurable scan interval
         
         # Trading state
         self.paper_mode = paper_balance is not None
@@ -1130,6 +1134,18 @@ def main():
         help="AI mode: filter (validate only), advisory (AI suggests), autonomous (AI trades), hybrid (AI scans + suggests)"
     )
     parser.add_argument(
+        "--symbol",
+        type=str,
+        default="LINK/USDT",
+        help="Trading symbol (e.g., LINK/USDT, BTC/USDT)"
+    )
+    parser.add_argument(
+        "--scan-interval",
+        type=int,
+        default=300,
+        help="AI proactive scan interval in seconds (default: 300 = 5 min)"
+    )
+    parser.add_argument(
         "--log-level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         default="INFO",
@@ -1145,7 +1161,9 @@ def main():
         paper_balance=args.paper_balance,
         ai_confidence=args.ai_confidence,
         ai_mode=args.ai_mode,
-        log_level=args.log_level
+        log_level=args.log_level,
+        symbol=args.symbol,
+        scan_interval=args.scan_interval
     )
     
     asyncio.run(bot.run())

@@ -321,6 +321,32 @@ Use /confirm or /reject, or tap below:
 """
         await self.send_message(msg)
     
+    async def notify_daily_summary(
+        self,
+        date: str,
+        trades: int,
+        wins: int,
+        losses: int,
+        pnl: float,
+        balance: float,
+        win_rate: float
+    ):
+        """Send daily trading summary."""
+        emoji = "📈" if pnl >= 0 else "📉"
+        
+        msg = f"""
+📊 *Daily Summary - {date}*
+
+{emoji} *Today's P&L:* `${pnl:+,.2f}`
+💰 *Balance:* `${balance:,.2f}`
+
+*Trades:* `{trades}` ({wins}W / {losses}L)
+*Win Rate:* `{win_rate:.1f}%`
+
+_Keep trading smart! 🤖_
+"""
+        await self.send_message(msg)
+    
     # =========== Command Handlers ===========
     
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
