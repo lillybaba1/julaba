@@ -160,7 +160,8 @@ class Julaba:
         log_level: str = "INFO",
         ai_mode: str = "filter",  # "filter", "advisory", "autonomous", "hybrid"
         symbol: str = "LINK/USDT",
-        scan_interval: int = 300
+        scan_interval: int = 300,
+        summary_interval: int = 14400  # 4 hours default
     ):
         # Set log level
         logging.getLogger().setLevel(getattr(logging, log_level.upper()))
@@ -191,6 +192,11 @@ class Julaba:
         # Streak tracking for intelligent risk management
         self.consecutive_wins = 0
         self.consecutive_losses = 0
+        
+        # Autonomous summary notifications
+        self.last_summary_time = None
+        self.summary_interval = summary_interval  # Configurable via CLI
+        self.last_daily_summary_date = None  # Track daily summary
         
         # History for Telegram commands
         self.trade_history: List[Dict] = []
@@ -697,6 +703,9 @@ class Julaba:
                 if self.position:
                     await self._manage_position()
                 
+                # Autonomous periodic summaries
+                await self._check_send_autonomous_summary()
+                
                 # Sleep before next iteration
                 await asyncio.sleep(5)
                 
@@ -741,6 +750,104 @@ class Julaba:
         if self.position is None and signal == 0 and self.ai_mode in ["advisory", "autonomous", "hybrid"]:
             await self._ai_proactive_scan(current_price, atr)
     
+    async def _check_send_autonomous_summary(self):
+        """Automatically send periodic trading summaries via Telegram."""
+        now = datetime.now(timezone.utc)
+        
+        # Check for daily summary (at midnight UTC)
+        today = now.date()
+        if self.last_daily_summary_date != today and now.hour == 0:
+            # Send daily summary
+            await self._send_daily_summary()
+            self.last_daily_summary_date = today
+            return
+        
+        # Check for periodic summary (every 4 hours)
+        if self.last_summary_time is None:
+            self.last_summary_time = now
+            return
+        
+        elapsed = (now - self.last_summary_time).total_seconds()
+        if elapsed >= self.summary_interval:
+            await self._send_periodic_summary()
+            self.last_summary_time = now
+    
+    async def _send_periodic_summary(self):
+        """Send a periodic status summary."""
+        if not self.telegram.enabled:
+            return
+        
+        # Calculate stats
+        uptime = datetime.now(timezone.utc) - self.start_time if self.start_time else timedelta(0)
+        hours = int(uptime.total_seconds() // 3600)
+        minutes = int((uptime.total_seconds() % 3600) // 60)
+        
+        pnl_pct = ((self.balance - self.initial_balance) / self.initial_balance * 100) if self.initial_balance > 0 else 0
+        drawdown = ((self.peak_balance - self.balance) / self.peak_balance * 100) if self.peak_balance > 0 else 0
+        
+        position_status = "None"
+        if self.position:
+            unrealized = self.position.unrealized_pnl(self.cached_last_price or self.position.entry_price)
+            position_status = f"{self.position.side.upper()} (${unrealized:+.2f})"
+        
+        # Get ML status
+        try:
+            ml_classifier = get_ml_classifier()
+            ml_stats = ml_classifier.get_stats()
+            ml_status = f"Trained ({ml_stats.get('total_samples', 0)} samples)" if ml_stats.get('is_trained') else f"Learning ({ml_stats.get('samples_until_training', 50)} needed)"
+        except:
+            ml_status = "N/A"
+        
+        emoji = "📈" if self.stats.total_pnl >= 0 else "📉"
+        
+        msg = f"""
+🤖 *Julaba Status Update*
+
+⏱ *Uptime:* `{hours}h {minutes}m`
+💰 *Balance:* `${self.balance:,.2f}` ({pnl_pct:+.2f}%)
+{emoji} *Total P&L:* `${self.stats.total_pnl:+,.2f}`
+📊 *Drawdown:* `{drawdown:.1f}%`
+
+*Trading Stats*
+🎯 Trades: `{self.stats.total_trades}` ({self.stats.winning_trades}W / {self.stats.losing_trades}L)
+📈 Win Rate: `{self.stats.win_rate * 100:.1f}%`
+🔥 Streak: `{self.consecutive_wins}W / {self.consecutive_losses}L`
+
+*Current State*
+📍 Position: `{position_status}`
+💵 Price: `${self.cached_last_price:,.4f}`
+🧠 ML: `{ml_status}`
+🤖 AI Mode: `{self.ai_mode}`
+
+_Auto-update every 4 hours_
+"""
+        await self.telegram.send_message(msg)
+        logger.info("Periodic summary sent to Telegram")
+    
+    async def _send_daily_summary(self):
+        """Send daily trading summary at midnight UTC."""
+        if not self.telegram.enabled:
+            return
+        
+        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+        
+        # Daily P&L from today_pnl stat
+        today_pnl = self.stats.today_pnl
+        
+        await self.telegram.notify_daily_summary(
+            date=yesterday,
+            trades=self.stats.total_trades,
+            wins=self.stats.winning_trades,
+            losses=self.stats.losing_trades,
+            pnl=today_pnl,
+            balance=self.balance,
+            win_rate=self.stats.win_rate * 100
+        )
+        
+        # Reset daily stats
+        self.stats.today_pnl = 0.0
+        logger.info(f"Daily summary sent for {yesterday}")
+
     async def _ai_proactive_scan(self, price: float, atr: float):
         """Let AI proactively scan for opportunities."""
         # Rate limit: only scan every 5 minutes
@@ -1146,6 +1253,12 @@ def main():
         help="AI proactive scan interval in seconds (default: 300 = 5 min)"
     )
     parser.add_argument(
+        "--summary-interval",
+        type=int,
+        default=14400,
+        help="Autonomous summary interval in seconds (default: 14400 = 4 hours)"
+    )
+    parser.add_argument(
         "--log-level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         default="INFO",
@@ -1163,7 +1276,8 @@ def main():
         ai_mode=args.ai_mode,
         log_level=args.log_level,
         symbol=args.symbol,
-        scan_interval=args.scan_interval
+        scan_interval=args.scan_interval,
+        summary_interval=args.summary_interval
     )
     
     asyncio.run(bot.run())
