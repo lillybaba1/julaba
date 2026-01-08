@@ -197,6 +197,7 @@ class Julaba:
         self.last_summary_time = None
         self.summary_interval = summary_interval  # Configurable via CLI
         self.last_daily_summary_date = None  # Track daily summary
+        self.summary_notifications_enabled = True  # Can be toggled via /summary command
         
         # History for Telegram commands
         self.trade_history: List[Dict] = []
@@ -248,6 +249,14 @@ class Julaba:
         # Intelligence callbacks
         self.telegram.get_intelligence = self._get_intelligence
         self.telegram.get_ml_stats = self._get_ml_stats
+        # Summary notification toggle
+        self.telegram.toggle_summary = self._toggle_summary_notifications
+        self.telegram.get_summary_status = lambda: self.summary_notifications_enabled
+    
+    def _toggle_summary_notifications(self) -> bool:
+        """Toggle summary notifications on/off. Returns new state."""
+        self.summary_notifications_enabled = not self.summary_notifications_enabled
+        return self.summary_notifications_enabled
     
     async def _chat_with_ai(self, message: str, context: str) -> str:
         """Chat with AI through Telegram."""
@@ -752,6 +761,9 @@ class Julaba:
     
     async def _check_send_autonomous_summary(self):
         """Automatically send periodic trading summaries via Telegram."""
+        if not self.summary_notifications_enabled:
+            return
+        
         now = datetime.now(timezone.utc)
         
         # Check for daily summary (at midnight UTC)

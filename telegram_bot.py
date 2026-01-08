@@ -61,6 +61,8 @@ class TelegramNotifier:
         self.close_ai_trade: Optional[Callable] = None  # AI chat can close positions
         self.get_intelligence: Optional[Callable] = None  # Intelligence summary
         self.get_ml_stats: Optional[Callable] = None  # ML classifier stats
+        self.toggle_summary: Optional[Callable] = None  # Toggle summary notifications
+        self.get_summary_status: Optional[Callable] = None  # Get summary status
         
         # Trading control state
         self.paused = False
@@ -105,6 +107,7 @@ class TelegramNotifier:
         # Intelligence commands
         self.app.add_handler(CommandHandler("intel", self._cmd_intel))
         self.app.add_handler(CommandHandler("ml", self._cmd_ml))
+        self.app.add_handler(CommandHandler("summary", self._cmd_summary))
         
         # Add callback query handler for inline buttons
         self.app.add_handler(CallbackQueryHandler(self._handle_callback))
@@ -388,6 +391,7 @@ _Keep trading smart! 🤖_
 🧠 *Intelligence Commands:*
 /intel - View intelligent trading features
 /ml - Machine learning classifier stats
+/summary - Toggle summary notifications on/off
 
 ⚙️ *Control Commands:*
 /pause - Pause trading
@@ -582,6 +586,39 @@ _Keep trading smart! 🤖_
                     msg += f"• `{feat}`: {imp:.2f}\n"
         else:
             msg = "⚠️ ML stats not available"
+        
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    async def _cmd_summary(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /summary command - toggle summary notifications on/off."""
+        if self.toggle_summary and self.get_summary_status:
+            # Toggle the state
+            new_state = self.toggle_summary()
+            
+            if new_state:
+                msg = """
+✅ *Summary Notifications: ON*
+
+📊 Periodic summaries will be sent automatically.
+• Every few hours (configurable)
+• Daily summary at 8:00 AM
+
+Use /summary again to turn off.
+"""
+            else:
+                msg = """
+🔇 *Summary Notifications: OFF*
+
+📊 Periodic summaries are now disabled.
+You can still use:
+• /status - Current status
+• /pnl - Performance stats
+• /intel - Intelligence overview
+
+Use /summary again to turn on.
+"""
+        else:
+            msg = "⚠️ Summary toggle not available"
         
         await update.message.reply_text(msg, parse_mode="Markdown")
 
