@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Benscript - AI-Enhanced Crypto Trading Bot
+Julaba - AI-Enhanced Crypto Trading Bot
 Combines the original trading strategy with AI signal filtering and Telegram notifications.
 """
 
@@ -24,7 +24,7 @@ load_dotenv()
 def setup_logging(log_level: str = "INFO") -> None:
     """Setup logging to both console and file."""
     log_dir = Path(__file__).parent
-    log_file = log_dir / "benscript.log"
+    log_file = log_dir / "julaba.log"
     
     formatter = logging.Formatter(
         "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -50,7 +50,7 @@ def setup_logging(log_level: str = "INFO") -> None:
     logging.info("="*60)
     logging.info("Log file: %s", log_file)
 
-logger = logging.getLogger("Benscript")
+logger = logging.getLogger("Julaba")
 
 # Import ccxt
 try:
@@ -61,7 +61,15 @@ except ImportError:
 # Import our modules
 from ai_filter import AISignalFilter
 from telegram_bot import get_telegram_notifier, TelegramNotifier
-from indicator import generate_signals
+from indicator import (
+    generate_signals,
+    detect_candlestick_patterns,
+    calculate_drawdown_adjusted_risk,
+    get_regime_analysis,
+    ml_predict_regime,
+    ml_record_trade,
+    get_ml_classifier
+)
 
 # ============== Data Classes ==============
 
@@ -81,6 +89,7 @@ class Position:
     tp3_hit: bool = False
     trailing_stop: Optional[float] = None
     opened_at: datetime = field(default_factory=datetime.utcnow)
+    entry_df_snapshot: Optional[pd.DataFrame] = None  # For ML learning
     
     @property
     def remaining_size(self) -> float:
@@ -123,7 +132,7 @@ class TradeStats:
 
 # ============== Main Bot Class ==============
 
-class Benscript:
+class Julaba:
     """
     AI-Enhanced Trading Bot with Telegram Integration.
     """
@@ -169,10 +178,15 @@ class Benscript:
         self.paper_mode = paper_balance is not None
         self.balance = paper_balance or 10000.0
         self.initial_balance = self.balance
+        self.peak_balance = self.balance  # Track peak for drawdown calculation
         self.position: Optional[Position] = None
         self.stats = TradeStats()
         self.start_time = None  # Set when bot actually starts running
         self.paused = False  # Trading pause state
+        
+        # Streak tracking for intelligent risk management
+        self.consecutive_wins = 0
+        self.consecutive_losses = 0
         
         # History for Telegram commands
         self.trade_history: List[Dict] = []
@@ -198,7 +212,7 @@ class Benscript:
         # Control
         self.running = False
         
-        logger.info(f"Benscript initialized | Paper: {self.paper_mode} | Balance: ${self.balance:,.2f}")
+        logger.info(f"Julaba initialized | Paper: {self.paper_mode} | Balance: ${self.balance:,.2f}")
     
     def _setup_telegram_callbacks(self):
         """Setup callbacks for Telegram commands."""
@@ -221,6 +235,9 @@ class Benscript:
         self.telegram.reject_ai_trade = self._reject_ai_trade
         self.telegram.execute_ai_trade = self._execute_ai_trade
         self.telegram.close_ai_trade = self._close_ai_trade
+        # Intelligence callbacks
+        self.telegram.get_intelligence = self._get_intelligence
+        self.telegram.get_ml_stats = self._get_ml_stats
     
     async def _chat_with_ai(self, message: str, context: str) -> str:
         """Chat with AI through Telegram."""
@@ -435,6 +452,59 @@ class Benscript:
         """Resume trading from Telegram command."""
         self.paused = False
         logger.info("Trading resumed via Telegram")
+
+    def _get_intelligence(self) -> Dict[str, Any]:
+        """Get intelligence summary for Telegram /intel command."""
+        result = {
+            'drawdown_mode': 'NORMAL',
+            'drawdown_pct': 0.0,
+            'consecutive_wins': self.consecutive_wins,
+            'consecutive_losses': self.consecutive_losses,
+            'pattern': None,
+            'regime': 'UNKNOWN',
+            'tradeable': False,
+            'ml_status': 'Not trained'
+        }
+        
+        # Drawdown calculation
+        if self.peak_balance > 0:
+            drawdown = (self.peak_balance - self.balance) / self.peak_balance * 100
+            result['drawdown_pct'] = round(drawdown, 2)
+            if drawdown >= 20:
+                result['drawdown_mode'] = 'EMERGENCY'
+            elif drawdown >= 10:
+                result['drawdown_mode'] = 'CAUTIOUS'
+            elif drawdown >= 5:
+                result['drawdown_mode'] = 'REDUCED'
+        
+        # Market regime
+        if len(self.bars_agg) >= 50:
+            regime = get_regime_analysis(self.bars_agg)
+            result['regime'] = regime.get('regime', 'UNKNOWN')
+            result['tradeable'] = regime.get('tradeable', False)
+            result['adx'] = regime.get('adx', 0)
+            result['hurst'] = regime.get('hurst', 0.5)
+            
+            # Pattern detection
+            pattern = detect_candlestick_patterns(self.bars_agg)
+            if pattern.get('pattern'):
+                result['pattern'] = pattern
+        
+        # ML status
+        ml_stats = get_ml_classifier().get_stats()
+        result['ml_samples'] = ml_stats.get('total_samples', 0)
+        result['ml_trained'] = ml_stats.get('is_trained', False)
+        if result['ml_trained']:
+            result['ml_status'] = f"Trained ({ml_stats.get('total_samples', 0)} samples)"
+        else:
+            needed = ml_stats.get('samples_until_training', 50)
+            result['ml_status'] = f"Learning ({needed} more needed)"
+        
+        return result
+    
+    def _get_ml_stats(self) -> Dict[str, Any]:
+        """Get ML classifier stats for Telegram /ml command."""
+        return get_ml_classifier().get_stats()
 
     def _set_ai_mode(self, mode: str) -> bool:
         """Set AI trading mode."""
@@ -768,8 +838,33 @@ class Benscript:
             logger.info(f"Signal {side} REJECTED by AI filter: {ai_result['reasoning']}")
     
     async def _open_position(self, signal: int, price: float, atr: float, source: str = "technical"):
-        """Open a new position."""
+        """Open a new position with intelligent risk management."""
         side = "long" if signal == 1 else "short"
+        
+        # Intelligent pattern detection
+        pattern = detect_candlestick_patterns(self.bars_agg) if len(self.bars_agg) >= 3 else {}
+        
+        # ML regime prediction
+        ml_prediction = ml_predict_regime(self.bars_agg) if len(self.bars_agg) >= 50 else {}
+        
+        # Smart drawdown-adjusted risk
+        drawdown_info = calculate_drawdown_adjusted_risk(
+            base_risk=self.RISK_PCT,
+            current_balance=self.balance,
+            peak_balance=self.peak_balance,
+            consecutive_losses=self.consecutive_losses,
+            consecutive_wins=self.consecutive_wins
+        )
+        
+        # Use adjusted risk for position sizing
+        adjusted_risk = drawdown_info['adjusted_risk']
+        
+        # Log intelligence
+        if pattern.get('pattern'):
+            logger.info(f"📊 Pattern: {pattern['pattern']} ({'Bullish' if pattern.get('bullish') else 'Bearish'})")
+        if ml_prediction.get('is_trained'):
+            logger.info(f"🧠 ML: {ml_prediction.get('ml_signal', 'N/A')} ({ml_prediction.get('ml_score', 0):.0%})")
+        logger.info(f"🎯 Risk Mode: {drawdown_info['mode']} ({adjusted_risk:.1%} risk)")
         
         # Calculate stop loss
         if side == "long":
@@ -778,7 +873,7 @@ class Benscript:
             stop_loss = price + (atr * self.ATR_MULT)
         
         risk_per_unit = abs(price - stop_loss)
-        risk_amount = self.balance * self.RISK_PCT
+        risk_amount = self.balance * adjusted_risk  # Use adjusted risk
         size = risk_amount / risk_per_unit
         
         # Calculate take profits
@@ -792,6 +887,9 @@ class Benscript:
             tp2 = price - (r_value * self.TP2_R)
             tp3 = price - (r_value * self.TP3_R)
         
+        # Store entry snapshot for ML learning
+        entry_snapshot = self.bars_agg.copy() if len(self.bars_agg) >= 50 else None
+        
         self.position = Position(
             symbol=self.SYMBOL,
             side=side,
@@ -800,7 +898,8 @@ class Benscript:
             stop_loss=stop_loss,
             tp1=tp1,
             tp2=tp2,
-            tp3=tp3
+            tp3=tp3,
+            entry_df_snapshot=entry_snapshot
         )
         
         source_label = "🤖 AI" if "ai" in source else "📊 Technical"
@@ -910,7 +1009,7 @@ class Benscript:
             )
     
     async def _close_position(self, reason: str, price: float):
-        """Close the position completely."""
+        """Close the position completely with ML learning."""
         pos = self.position
         
         # Calculate final P&L on remaining
@@ -924,6 +1023,10 @@ class Benscript:
         self.stats.today_pnl += pnl
         self.stats.total_trades += 1
         
+        # Update peak balance for drawdown tracking
+        if self.balance > self.peak_balance:
+            self.peak_balance = self.balance
+        
         # Track max win/loss
         if pnl > self.stats.max_win:
             self.stats.max_win = pnl
@@ -933,10 +1036,20 @@ class Benscript:
         total_pnl = pnl  # This is just remaining, full P&L was already added in _hit_tp
         pnl_pct = (self.balance - self.initial_balance) / self.initial_balance * 100
         
-        if pnl >= 0:
+        is_win = pnl >= 0
+        if is_win:
             self.stats.winning_trades += 1
+            self.consecutive_wins += 1
+            self.consecutive_losses = 0
         else:
             self.stats.losing_trades += 1
+            self.consecutive_losses += 1
+            self.consecutive_wins = 0
+        
+        # ML Learning: record trade outcome for model training
+        if pos.entry_df_snapshot is not None:
+            ml_record_trade(pos.entry_df_snapshot, is_win)
+            logger.debug(f"ML sample recorded: {'WIN' if is_win else 'LOSS'}")
         
         # Record in trade history
         self.trade_history.append({
@@ -952,12 +1065,12 @@ class Benscript:
             self.trade_history = self.trade_history[-50:]
         
         # Record result for AI filter learning
-        is_win = pnl > 0
         self.ai_filter.record_trade_result(is_win, pnl)
         
         logger.info(
             f"CLOSED {pos.side.upper()} | Reason: {reason} | Price: {price:.4f} | "
-            f"P&L: ${pnl:+.2f} | Balance: ${self.balance:,.2f}"
+            f"P&L: ${pnl:+.2f} | Balance: ${self.balance:,.2f} | "
+            f"Streak: W{self.consecutive_wins}/L{self.consecutive_losses}"
         )
         
         if self.telegram.enabled:
@@ -983,7 +1096,7 @@ class Benscript:
         self.running = False
         
         if self.telegram.enabled:
-            await self.telegram.send_message("🛑 *Benscript Bot Stopped*")
+            await self.telegram.send_message("🛑 *Julaba Bot Stopped*")
             await self.telegram.stop()
         
         if self.exchange:
@@ -996,7 +1109,7 @@ class Benscript:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Benscript - AI-Enhanced Crypto Trading Bot"
+        description="Julaba - AI-Enhanced Crypto Trading Bot"
     )
     parser.add_argument(
         "--paper-balance",
@@ -1028,7 +1141,7 @@ def main():
     # Setup file logging before anything else
     setup_logging(args.log_level)
     
-    bot = Benscript(
+    bot = Julaba(
         paper_balance=args.paper_balance,
         ai_confidence=args.ai_confidence,
         ai_mode=args.ai_mode,

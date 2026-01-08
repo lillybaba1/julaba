@@ -1,5 +1,5 @@
 """
-Telegram Bot for Benscript Trading System
+Telegram Bot for Julaba Trading System
 Provides real-time notifications and interactive commands.
 """
 
@@ -59,6 +59,8 @@ class TelegramNotifier:
         self.reject_ai_trade: Optional[Callable] = None
         self.execute_ai_trade: Optional[Callable] = None  # AI chat can execute trades
         self.close_ai_trade: Optional[Callable] = None  # AI chat can close positions
+        self.get_intelligence: Optional[Callable] = None  # Intelligence summary
+        self.get_ml_stats: Optional[Callable] = None  # ML classifier stats
         
         # Trading control state
         self.paused = False
@@ -100,6 +102,9 @@ class TelegramNotifier:
         self.app.add_handler(CommandHandler("aimode", self._cmd_aimode))
         self.app.add_handler(CommandHandler("confirm", self._cmd_confirm))
         self.app.add_handler(CommandHandler("reject", self._cmd_reject))
+        # Intelligence commands
+        self.app.add_handler(CommandHandler("intel", self._cmd_intel))
+        self.app.add_handler(CommandHandler("ml", self._cmd_ml))
         
         # Add callback query handler for inline buttons
         self.app.add_handler(CallbackQueryHandler(self._handle_callback))
@@ -128,7 +133,7 @@ class TelegramNotifier:
         )
         
         logger.info("Telegram bot started - listening for commands")
-        await self.send_message("🤖 *Benscript Bot Started*\n\nType /help for commands")
+        await self.send_message("🤖 *Julaba Bot Started*\n\nType /help for commands")
     
     async def stop(self):
         """Stop the Telegram bot."""
@@ -321,7 +326,7 @@ Use /confirm or /reject, or tap below:
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /start command."""
         await update.message.reply_text(
-            "🤖 *Benscript Trading Bot*\n\n"
+            "🤖 *Julaba Trading Bot*\n\n"
             "I'll send you real-time trading alerts and AI analysis.\n\n"
             "Use /help to see available commands.",
             parse_mode="Markdown"
@@ -330,7 +335,7 @@ Use /confirm or /reject, or tap below:
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /help command."""
         msg = """
-🤖 *Benscript Commands*
+🤖 *Julaba Commands*
 
 📊 *Info Commands:*
 /status - Bot status & connection info
@@ -353,6 +358,10 @@ Use /confirm or /reject, or tap below:
 /aimode hybrid - AI scans + suggests
 /confirm - Confirm pending AI trade
 /reject - Reject pending AI trade
+
+🧠 *Intelligence Commands:*
+/intel - View intelligent trading features
+/ml - Machine learning classifier stats
 
 ⚙️ *Control Commands:*
 /pause - Pause trading
@@ -381,7 +390,7 @@ Use /confirm or /reject, or tap below:
             pnl_pct = ((s.get('balance', 0) - initial) / initial * 100) if initial > 0 else 0
             
             msg = f"""
-📊 *Benscript Status*
+📊 *Julaba Status*
 
 *Connection*
 🔌 Status: {'✅ Connected' if s.get('connected') else '❌ Disconnected'}
@@ -455,6 +464,98 @@ Use /confirm or /reject, or tap below:
 """
         else:
             msg = "⚠️ AI stats not available"
+        
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    async def _cmd_intel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /intel command - show intelligent trading features."""
+        if self.get_intelligence:
+            i = self.get_intelligence()
+            
+            # Drawdown mode emoji
+            mode = i.get('drawdown_mode', 'NORMAL')
+            if mode == 'EMERGENCY':
+                mode_emoji = "🚨"
+            elif mode == 'CAUTIOUS':
+                mode_emoji = "⚠️"
+            elif mode == 'REDUCED':
+                mode_emoji = "📉"
+            else:
+                mode_emoji = "✅"
+            
+            # Pattern info
+            pattern_info = "None detected"
+            pattern = i.get('pattern')
+            if pattern and pattern.get('pattern'):
+                p_dir = "🟢 Bullish" if pattern.get('bullish') else ("🔴 Bearish" if pattern.get('bullish') is False else "⚪ Neutral")
+                pattern_info = f"{pattern.get('pattern')} ({p_dir})"
+            
+            # Regime info
+            regime = i.get('regime', 'UNKNOWN')
+            tradeable = "✅ Yes" if i.get('tradeable') else "❌ No"
+            
+            msg = f"""
+🧠 *Intelligence Summary*
+
+*Risk Management*
+{mode_emoji} Mode: `{mode}`
+📊 Drawdown: `{i.get('drawdown_pct', 0):.1f}%`
+🔥 Win Streak: `{i.get('consecutive_wins', 0)}`
+❄️ Loss Streak: `{i.get('consecutive_losses', 0)}`
+
+*Market Analysis*
+📈 Regime: `{regime}`
+🎯 Tradeable: {tradeable}
+📏 ADX: `{i.get('adx', 0):.1f}`
+📐 Hurst: `{i.get('hurst', 0.5):.2f}`
+
+*Pattern Detection*
+🕯️ Pattern: `{pattern_info}`
+
+*Machine Learning*
+🤖 Status: `{i.get('ml_status', 'Not available')}`
+"""
+        else:
+            msg = "⚠️ Intelligence data not available"
+        
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    async def _cmd_ml(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /ml command - show ML classifier stats."""
+        if self.get_ml_stats:
+            stats = self.get_ml_stats()
+            
+            trained = "✅ Yes" if stats.get('is_trained') else "❌ No"
+            samples = stats.get('total_samples', 0)
+            needed = stats.get('samples_until_training', 50)
+            
+            msg = f"""
+🧠 *ML Classifier Stats*
+
+*Training Status*
+📚 Trained: {trained}
+📊 Samples: `{samples}`
+{'🎯 Samples until training: `' + str(needed) + '`' if needed > 0 else ''}
+
+*Historical Performance*
+"""
+            if samples > 0:
+                wins = stats.get('wins', 0)
+                losses = stats.get('losses', 0)
+                wr = stats.get('historical_win_rate', 0)
+                msg += f"✅ Wins: `{wins}`\n"
+                msg += f"❌ Losses: `{losses}`\n"
+                msg += f"📈 Win Rate: `{wr:.1%}`\n"
+            else:
+                msg += "_No trades recorded yet_\n"
+            
+            # Top features if trained
+            if stats.get('is_trained') and stats.get('top_features'):
+                msg += "\n*Top Predictive Features*\n"
+                for feat, imp in stats.get('top_features', [])[:3]:
+                    msg += f"• `{feat}`: {imp:.2f}\n"
+        else:
+            msg = "⚠️ ML stats not available"
         
         await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -755,21 +856,17 @@ Example: `/aimode advisory`""",
         if self.chat_with_ai:
             try:
                 response = await self.chat_with_ai(user_message, context_info)
-                # Escape special markdown characters to prevent parsing errors
-                # Keep basic formatting but escape problematic characters
-                safe_response = response.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
-                await update.message.reply_text(safe_response, parse_mode="Markdown")
+                await update.message.reply_text(response, parse_mode="Markdown")
             except Exception as e:
                 logger.error(f"AI chat error: {e}")
-                # Try sending without markdown if it fails
-                try:
-                    await update.message.reply_text(response or "🤖 Sorry, I had trouble processing that.")
-                except:
-                    await update.message.reply_text("🤖 Sorry, I had trouble processing that. Try asking again or use /help.")
+                await update.message.reply_text(
+                    "🤖 Sorry, I had trouble processing that. Try asking again or use /help to see available commands.",
+                    parse_mode="Markdown"
+                )
         else:
             # Fallback if AI not available
             await update.message.reply_text(
-                "🤖 Hi! I'm Benscript, your trading assistant.\n\n"
+                "🤖 Hi! I'm Julaba, your trading assistant.\n\n"
                 "Use /help to see what I can do, or ask me anything about trading!",
                 parse_mode="Markdown"
             )

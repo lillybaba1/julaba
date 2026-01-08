@@ -30,14 +30,16 @@ class AISignalFilter:
     STRICT MODE: Higher threshold, skeptic prompt, loss cooldown.
     """
     
-    def __init__(self, confidence_threshold: float = 0.80):
+    def __init__(self, confidence_threshold: float = 0.80, notifier=None):
         """
         Initialize the AI Signal Filter.
         
         Args:
             confidence_threshold: Minimum confidence (0-1) required to approve a trade
+            notifier: Optional TelegramNotifier instance for notifications
         """
         self.confidence_threshold = confidence_threshold
+        self.notifier = notifier
         self.loss_cooldown_threshold = 0.90  # Require 90% after a loss
         self.api_key = os.getenv("GEMINI_API_KEY", "")
         self.use_ai = bool(self.api_key and "your_" not in self.api_key.lower())
@@ -47,29 +49,6 @@ class AISignalFilter:
         # Trading performance tracking - load from persistent storage
         self.recent_trades = []  # List of {"result": "win"/"loss", "pnl": float, "time": str}
         self.consecutive_losses = 0
-        self.consecutive_wins = 0
-        self.total_wins = 0
-        self.total_losses = 0
-        
-        # Chat history for context
-        self.chat_history: List[Dict[str, str]] = []
-        self.max_chat_history = 20  # Keep last 20 messages for context
-        
-        # Load persistent history
-        self._load_persistent_history()
-        
-        if self.use_ai:
-            try:
-                import google.generativeai as genai
-                genai.configure(api_key=self.api_key)
-                self.model = genai.GenerativeModel('gemini-2.5-flash')
-                logger.info("Gemini 2.5 Flash AI filter initialized (fast mode)")
-            except Exception as e:
-                logger.warning(f"Failed to initialize Gemini: {e}")
-                self.use_ai = False
-        
-        if not self.use_ai:
-            logger.info("GEMINI_API_KEY not set - AI filter will use rule-based analysis")
     
     def record_trade_result(self, is_win: bool, pnl: float):
         """Record a trade result to inform future AI decisions."""
@@ -93,80 +72,111 @@ class AISignalFilter:
             self.consecutive_wins = 0
         
         logger.info(f"Trade recorded: {result} ${pnl:+.2f} | Streak: {self.consecutive_wins}W / {self.consecutive_losses}L")
-        
-        # Save to persistent storage
-        self._save_persistent_history()
-    
-    def _load_persistent_history(self):
-        """Load trading history and chat history from disk."""
-        # Load trade history
-        if TRADE_HISTORY_FILE.exists():
+
+    def _ai_analysis(
+        self,
+        signal: int,
+        context: Dict[str, Any],
+        symbol: str
+    ) -> Dict[str, Any]:
+        """Use Google Gemini API for signal analysis with SKEPTIC MODE. Retries once and notifies via Telegram on fallback."""
+        signal_type = "LONG" if signal == 1 else "SHORT"
+        perf = self._get_performance_context()
+        market = self._get_market_hours_context()
+        extra_caution = ""
+        if perf["last_trade_was_loss"]:
+            extra_caution = f"\n⚠️ CAUTION: Last {perf['consecutive_losses']} trade(s) were losses. Be extra skeptical!"
+        if perf["consecutive_losses"] >= 2:
+            extra_caution += "\n🛑 LOSING STREAK: Require very high confidence to approve."
+        if market["is_weekend"]:
+            extra_caution += "\n📅 WEEKEND: Lower liquidity, higher risk of false moves."
+        if market["activity_level"] == "low":
+            extra_caution += "\n🌙 LOW ACTIVITY HOURS: Increased slippage risk."
+        prompt = (
+            f"You are a SKEPTICAL crypto trading supervisor. Your job is to PROTECT capital by rejecting bad trades.\n"
+            f"=== SIGNAL ===\n"
+            f"Proposed Trade: {signal_type} on {symbol}\n"
+            f"=== MARKET DATA ===\n"
+            f"Current Price: ${context['current_price']}\n"
+            f"1-Hour Price Change: {context['price_change_1h']}%\n"
+            f"Volume Ratio (vs avg): {context['volume_ratio']}x\n"
+            f"Trend (SMA10 vs SMA20): {context['trend']}\n"
+            f"Volatility (ATR%): {context['volatility_pct']}%\n"
+            f"=== TRADING PERFORMANCE ===\n"
+            f"Total Trades: {perf['total_trades']}\n"
+            f"Win Rate: {perf['win_rate']}%\n"
+            f"Current Streak: {perf['consecutive_wins']}W / {perf['consecutive_losses']}L\n"
+            f"Recent P&L (last 5): ${perf['recent_pnl']}\n"
+            f"=== MARKET SESSION ===\n"
+            f"Session: {market['session']} ({market['hour_utc']}:00 UTC)\n"
+            f"Activity Level: {market['activity_level']}\n"
+            f"Weekend: {market['is_weekend']}\n"
+            f"{extra_caution}\n"
+            f"=== YOUR TASK ===\n"
+            f"FIRST, list 3 reasons why this trade could FAIL.\n"
+            f"THEN, decide if the setup is strong enough to overcome those risks.\n"
+            f"Only approve if you are genuinely confident. When in doubt, REJECT.\n"
+            f"Respond ONLY with this JSON format, no other text:\n"
+            f'{{"reasons_against": ["reason1", "reason2", "reason3"], "approved": false, "confidence": 0.65, "reasoning": "why approved or rejected", "risk_assessment": "low/medium/high"}}'
+        )
+        for attempt in range(2):
             try:
-                with open(TRADE_HISTORY_FILE, 'r') as f:
-                    data = json.load(f)
-                    self.recent_trades = data.get("recent_trades", [])
-                    self.total_wins = data.get("total_wins", 0)
-                    self.total_losses = data.get("total_losses", 0)
-                    self.consecutive_wins = data.get("consecutive_wins", 0)
-                    self.consecutive_losses = data.get("consecutive_losses", 0)
-                    logger.info(f"Loaded trade history: {self.total_wins}W/{self.total_losses}L")
+                response = self.model.generate_content(prompt)
+                result_text = response.text.strip()
+                # Parse JSON from response
+                if "```json" in result_text:
+                    result_text = result_text.split("```json")[1].split("```")[0]
+                elif "```" in result_text:
+                    result_text = result_text.split("```")[1].split("```")[0]
+                result_text = result_text.strip()
+                result = json.loads(result_text)
+                result.setdefault("approved", False)
+                result.setdefault("confidence", 0.5)
+                result.setdefault("reasoning", "AI analysis")
+                result.setdefault("risk_assessment", "medium")
+                result.setdefault("reasons_against", [])
+                # Apply confidence threshold with LOSS COOLDOWN
+                perf = self._get_performance_context()
+                if perf["consecutive_losses"] >= 2:
+                    required_threshold = self.loss_cooldown_threshold
+                    logger.info(f"Loss cooldown active: requiring {required_threshold:.0%} confidence")
+                elif perf["last_trade_was_loss"]:
+                    required_threshold = 0.85
+                else:
+                    required_threshold = self.confidence_threshold
+                result["approved"] = result["approved"] and result["confidence"] >= required_threshold
+                result["threshold_used"] = required_threshold
+                if result.get("reasons_against"):
+                    logger.info(f"AI reasons against trade: {result['reasons_against']}")
+                return result
             except Exception as e:
-                logger.warning(f"Failed to load trade history: {e}")
-        
-        # Load chat history
-        if CHAT_HISTORY_FILE.exists():
+                logger.warning(f"Gemini analysis attempt {attempt+1} failed: {e}")
+        # If both attempts fail, notify via Telegram and fallback
+        logger.error(f"Gemini analysis failed twice, falling back to rules")
+        if self.notifier and hasattr(self.notifier, 'send_message'):
             try:
-                with open(CHAT_HISTORY_FILE, 'r') as f:
-                    data = json.load(f)
-                    self.chat_history = data.get("messages", [])[-self.max_chat_history:]
-                    logger.info(f"Loaded {len(self.chat_history)} chat messages from history")
-            except Exception as e:
-                logger.warning(f"Failed to load chat history: {e}")
-    
-    def _save_persistent_history(self):
-        """Save trading history and chat history to disk."""
-        # Save trade history
-        try:
-            trade_data = {
-                "recent_trades": self.recent_trades[-10:],
-                "total_wins": self.total_wins,
-                "total_losses": self.total_losses,
-                "consecutive_wins": self.consecutive_wins,
-                "consecutive_losses": self.consecutive_losses,
-                "last_updated": datetime.utcnow().isoformat()
-            }
-            with open(TRADE_HISTORY_FILE, 'w') as f:
-                json.dump(trade_data, f, indent=2)
-        except Exception as e:
-            logger.warning(f"Failed to save trade history: {e}")
-    
-    def _save_chat_history(self):
-        """Save chat history to disk."""
-        try:
-            chat_data = {
-                "messages": self.chat_history[-self.max_chat_history:],
-                "last_updated": datetime.utcnow().isoformat()
-            }
-            with open(CHAT_HISTORY_FILE, 'w') as f:
-                json.dump(chat_data, f, indent=2)
-        except Exception as e:
-            logger.warning(f"Failed to save chat history: {e}")
-    
-    def _get_performance_context(self) -> Dict[str, Any]:
-        """Get recent trading performance for AI context."""
-        total = self.total_wins + self.total_losses
-        win_rate = (self.total_wins / total * 100) if total > 0 else 0
-        
-        recent_pnl = sum(t["pnl"] for t in self.recent_trades[-5:]) if self.recent_trades else 0
-        
-        return {
-            "total_trades": total,
-            "win_rate": round(win_rate, 1),
-            "consecutive_wins": self.consecutive_wins,
-            "consecutive_losses": self.consecutive_losses,
-            "recent_pnl": round(recent_pnl, 2),
-            "last_trade_was_loss": self.consecutive_losses > 0
-        }
+                import asyncio
+                msg = f"⚠️ Gemini AI analysis failed twice for {symbol} {signal_type}. Falling back to rule-based analysis."
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(self.notifier.send_message(msg))
+                else:
+                    loop.run_until_complete(self.notifier.send_message(msg))
+            except Exception as notify_err:
+                logger.warning(f"Failed to send Telegram notification: {notify_err}")
+            if self.notifier and hasattr(self.notifier, 'send_message'):
+                try:
+                    import asyncio
+                    msg = f"⚠️ Gemini AI analysis failed twice for {symbol} {signal_type}. Falling back to rule-based analysis."
+                    # If running in an async context, schedule the message
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        loop.create_task(self.notifier.send_message(msg))
+                    else:
+                        loop.run_until_complete(self.notifier.send_message(msg))
+                except Exception as notify_err:
+                    logger.warning(f"Failed to send Telegram notification: {notify_err}")
+            return self._rule_based_analysis(signal, context, symbol)
     
     def _get_market_hours_context(self) -> Dict[str, Any]:
         """Get market timing context."""
@@ -591,7 +601,7 @@ Respond ONLY with valid JSON, no other text:"""
             if self.chat_history:
                 history_text = "\n\nRecent Conversation History:\n"
                 for msg in self.chat_history[-10:]:  # Last 10 exchanges
-                    role = "User" if msg["role"] == "user" else "Benscript"
+                    role = "Silla" if msg["role"] == "user" else "Julaba"
                     history_text += f"{role}: {msg['content']}\n"
             
             # Build trade performance summary
@@ -604,8 +614,8 @@ Respond ONLY with valid JSON, no other text:"""
                 elif self.consecutive_losses > 0:
                     trade_summary += f" | Current streak: {self.consecutive_losses} losses 📉"
             
-            prompt = f"""You are Benscript, a smart, enthusiastic, and proactive crypto trading assistant bot.
-You are helpful, eager to assist, and always ready with market insights.
+            prompt = f"""You are Julaba, a smart, enthusiastic, and proactive crypto trading assistant bot.
+Your owner is Silla. You are loyal, eager to help, and always ready with market insights.
 {trade_summary}
 
 CURRENT SYSTEM STATUS:
@@ -641,7 +651,7 @@ ALWAYS DO THIS:
 - If asked to trade, either confirm it worked (if ✅ appears) or guide them how to do it
 - Be the best trading assistant Silla could ask for!
 
-Respond as Benscript:"""
+Respond as Julaba:"""
 
             response = self.model.generate_content(prompt)
             ai_response = response.text.strip()
@@ -668,7 +678,7 @@ Respond as Benscript:"""
         message_lower = message.lower()
         
         if any(word in message_lower for word in ["hello", "hi", "hey", "sup"]):
-            return "👋 Hey there! I'm Benscript, your trading assistant. How can I help you today?"
+            return "👋 Hey there! I'm Julaba, your trading assistant. How can I help you today?"
         
         if any(word in message_lower for word in ["how are you", "how's it going"]):
             return "🤖 I'm running smoothly and watching the markets! How can I help you?"
