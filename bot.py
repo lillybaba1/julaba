@@ -249,6 +249,7 @@ class Julaba:
         # Intelligence callbacks
         self.telegram.get_intelligence = self._get_intelligence
         self.telegram.get_ml_stats = self._get_ml_stats
+        self.telegram.get_regime = self._get_regime
         # Summary notification toggle
         self.telegram.toggle_summary = self._toggle_summary_notifications
         self.telegram.get_summary_status = lambda: self.summary_notifications_enabled
@@ -524,6 +525,59 @@ class Julaba:
     def _get_ml_stats(self) -> Dict[str, Any]:
         """Get ML classifier stats for Telegram /ml command."""
         return get_ml_classifier().get_stats()
+    
+    def _get_regime(self) -> Dict[str, Any]:
+        """Get current market regime for Telegram /regime command."""
+        result = {
+            'regime': 'UNKNOWN',
+            'adx': 0,
+            'hurst': 0.5,
+            'volatility': 'normal',
+            'volatility_ratio': 1.0,
+            'tradeable': False,
+            'ml_prediction': None,
+            'ml_confidence': 0,
+            'description': 'Insufficient data'
+        }
+        
+        if len(self.bars_agg) < 50:
+            result['description'] = f'Need more data ({len(self.bars_agg)}/50 bars)'
+            return result
+        
+        # Get regime analysis
+        regime = get_regime_analysis(self.bars_agg)
+        result['regime'] = regime.get('regime', 'UNKNOWN')
+        result['adx'] = round(regime.get('adx', 0), 1)
+        result['hurst'] = round(regime.get('hurst', 0.5), 3)
+        result['tradeable'] = regime.get('tradeable', False)
+        
+        # Volatility
+        from indicator import calculate_volatility_regime
+        vol = calculate_volatility_regime(self.bars_agg['close'])
+        result['volatility'] = vol.get('regime', 'normal')
+        result['volatility_ratio'] = round(vol.get('volatility_ratio', 1.0), 2)
+        
+        # ML prediction if trained
+        ml = get_ml_classifier()
+        if ml.is_trained:
+            from indicator import compute_ml_features
+            features = compute_ml_features(self.bars_agg)
+            pred = ml.predict(features)
+            if pred:
+                result['ml_prediction'] = pred.get('regime')
+                result['ml_confidence'] = round(pred.get('confidence', 0) * 100, 1)
+        
+        # Description
+        regime_desc = {
+            'STRONG_TRENDING': 'Strong directional move - trend following works well',
+            'TRENDING': 'Clear trend - good for momentum strategies',
+            'WEAK_TRENDING': 'Weak trend - caution advised',
+            'RANGING': 'Sideways market - mean reversion may work',
+            'CHOPPY': 'Choppy/noisy - avoid trading'
+        }
+        result['description'] = regime_desc.get(result['regime'], 'Unknown market condition')
+        
+        return result
 
     def _set_ai_mode(self, mode: str) -> bool:
         """Set AI trading mode."""

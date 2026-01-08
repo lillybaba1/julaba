@@ -61,6 +61,7 @@ class TelegramNotifier:
         self.close_ai_trade: Optional[Callable] = None  # AI chat can close positions
         self.get_intelligence: Optional[Callable] = None  # Intelligence summary
         self.get_ml_stats: Optional[Callable] = None  # ML classifier stats
+        self.get_regime: Optional[Callable] = None  # Market regime analysis
         self.toggle_summary: Optional[Callable] = None  # Toggle summary notifications
         self.get_summary_status: Optional[Callable] = None  # Get summary status
         
@@ -107,6 +108,7 @@ class TelegramNotifier:
         # Intelligence commands
         self.app.add_handler(CommandHandler("intel", self._cmd_intel))
         self.app.add_handler(CommandHandler("ml", self._cmd_ml))
+        self.app.add_handler(CommandHandler("regime", self._cmd_regime))
         self.app.add_handler(CommandHandler("summary", self._cmd_summary))
         
         # Add callback query handler for inline buttons
@@ -391,6 +393,7 @@ _Keep trading smart! 🤖_
 🧠 *Intelligence Commands:*
 /intel - View intelligent trading features
 /ml - Machine learning classifier stats
+/regime - Current market regime analysis
 /summary - Toggle summary notifications on/off
 
 ⚙️ *Control Commands:*
@@ -586,6 +589,57 @@ _Keep trading smart! 🤖_
                     msg += f"• `{feat}`: {imp:.2f}\n"
         else:
             msg = "⚠️ ML stats not available"
+        
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    async def _cmd_regime(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /regime command - show current market regime analysis."""
+        if self.get_regime:
+            r = self.get_regime()
+            
+            # Regime emoji
+            regime_emoji = {
+                'STRONG_TRENDING': '🚀',
+                'TRENDING': '📈',
+                'WEAK_TRENDING': '📊',
+                'RANGING': '↔️',
+                'CHOPPY': '🌊',
+                'UNKNOWN': '❓'
+            }.get(r.get('regime', 'UNKNOWN'), '❓')
+            
+            # Volatility emoji
+            vol_emoji = {'high': '🔥', 'low': '❄️', 'normal': '✅'}.get(r.get('volatility', 'normal'), '✅')
+            
+            # Tradeable emoji
+            trade_emoji = '✅' if r.get('tradeable') else '⚠️'
+            
+            msg = f"""
+📊 *Market Regime Analysis*
+
+{regime_emoji} *Regime:* `{r.get('regime', 'UNKNOWN')}`
+{trade_emoji} *Tradeable:* {'Yes' if r.get('tradeable') else 'No'}
+
+📈 *Indicators:*
+• ADX (Trend Strength): `{r.get('adx', 0)}`
+• Hurst Exponent: `{r.get('hurst', 0.5)}`
+  _(>0.5 trending, <0.5 mean-reverting)_
+
+{vol_emoji} *Volatility:*
+• Level: `{r.get('volatility', 'normal').upper()}`
+• Ratio: `{r.get('volatility_ratio', 1.0)}x`
+"""
+            
+            # ML prediction if available
+            if r.get('ml_prediction'):
+                msg += f"""
+🤖 *ML Prediction:*
+• Predicted: `{r.get('ml_prediction')}`
+• Confidence: `{r.get('ml_confidence', 0)}%`
+"""
+            
+            msg += f"\n💡 _{r.get('description', '')}_"
+        else:
+            msg = "⚠️ Regime analysis not available"
         
         await update.message.reply_text(msg, parse_mode="Markdown")
 
