@@ -1,0 +1,30 @@
+{
+  "analysis_date": "2026-01-08T06:02:28.057529",
+  "symbol": "LINK/USDT",
+  "data_points": 9951,
+  "methods_used": [
+    "Hypothesis Testing",
+    "Kelly Criterion",
+    "Monte Carlo Simulation",
+    "Fourier Analysis",
+    "Walk-Forward Optimization",
+    "Chi-Square / Z-Test",
+    "Drawdown Distribution"
+  ],
+  "old_params": {
+    "short_sma": 10,
+    "long_sma": 30,
+    "risk_pct": 0.02,
+    "filters": null
+  },
+  "new_params": {
+    "short_sma": 15,
+    "long_sma": 40,
+    "risk_pct": 0.015,
+    "filters": [
+      "RSI",
+      "Volume"
+    ]
+  },
+  "validation": "Walk-forward optimization confirms robustness"
+}

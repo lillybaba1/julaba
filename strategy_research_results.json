@@ -1,0 +1,124 @@
+{
+  "generated_at": "2026-01-08T05:46:37.624143",
+  "symbol": "LINK/USDT",
+  "timeframe": "1m",
+  "data_range": "10080 candles",
+  "initial_balance": 10000,
+  "baseline_strategy": {
+    "name": "SMA 10/30 Crossover",
+    "trades": 138,
+    "win_rate": 21.0,
+    "net_profit": -4167.74,
+    "max_drawdown": 68.4,
+    "sharpe_ratio": -33.07
+  },
+  "best_strategy": {
+    "name": "+ RSI + Volume",
+    "trades": 70,
+    "win_rate": 27.1,
+    "net_profit": -1097.84,
+    "max_drawdown": 32.7,
+    "sharpe_ratio": -15.19
+  },
+  "all_results": [
+    {
+      "name": "Baseline (No Filters)",
+      "trades": 138,
+      "win_rate": 21.0,
+      "net_profit": -4167.74,
+      "max_drawdown": 68.4,
+      "sharpe_ratio": -33.07,
+      "profit_factor": 0.6
+    },
+    {
+      "name": "+ RSI Filter",
+      "trades": 130,
+      "win_rate": 21.5,
+      "net_profit": -3923.81,
+      "max_drawdown": 66.8,
+      "sharpe_ratio": -31.81,
+      "profit_factor": 0.62
+    },
+    {
+      "name": "+ ADX Filter",
+      "trades": 134,
+      "win_rate": 22.4,
+      "net_profit": -3557.27,
+      "max_drawdown": 65.5,
+      "sharpe_ratio": -30.9,
+      "profit_factor": 0.66
+    },
+    {
+      "name": "+ Volume Filter",
+      "trades": 85,
+      "win_rate": 25.9,
+      "net_profit": -1704.66,
+      "max_drawdown": 41.4,
+      "sharpe_ratio": -19.08,
+      "profit_factor": 0.79
+    },
+    {
+      "name": "+ RSI + ADX",
+      "trades": 119,
+      "win_rate": 22.7,
+      "net_profit": -3229.1,
+      "max_drawdown": 61.8,
+      "sharpe_ratio": -29.31,
+      "profit_factor": 0.67
+    },
+    {
+      "name": "+ RSI + Volume",
+      "trades": 70,
+      "win_rate": 27.1,
+      "net_profit": -1097.84,
+      "max_drawdown": 32.7,
+      "sharpe_ratio": -15.19,
+      "profit_factor": 0.84
+    },
+    {
+      "name": "+ ADX + Volume",
+      "trades": 75,
+      "win_rate": 25.3,
+      "net_profit": -1605.05,
+      "max_drawdown": 37.0,
+      "sharpe_ratio": -17.57,
+      "profit_factor": 0.78
+    },
+    {
+      "name": "ALL Filters",
+      "trades": 62,
+      "win_rate": 25.8,
+      "net_profit": -1343.11,
+      "max_drawdown": 34.0,
+      "sharpe_ratio": -17.05,
+      "profit_factor": 0.77
+    }
+  ],
+  "recommendations": [
+    {
+      "priority": "HIGH",
+      "change": "Add ADX Trend Filter",
+      "file": "indicator.py"
+    },
+    {
+      "priority": "MEDIUM",
+      "change": "Add RSI Filter",
+      "file": "indicator.py"
+    },
+    {
+      "priority": "MEDIUM",
+      "change": "Add Volume Confirmation",
+      "file": "indicator.py"
+    },
+    {
+      "priority": "HIGH",
+      "change": "Reduce Position Size or Stop Loss",
+      "file": "bot.py"
+    },
+    {
+      "priority": "MEDIUM",
+      "change": "Tighter Trailing Stops After TP1",
+      "file": "bot.py"
+    }
+  ]
+}
