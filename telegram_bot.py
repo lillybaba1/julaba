@@ -39,6 +39,9 @@ class TelegramNotifier:
         self.bot: Optional[Bot] = None
         self.app: Optional[Application] = None
         
+        # Startup timestamp - ignore messages older than this
+        self.startup_time: Optional[datetime] = None
+        
         # Trading state reference (set by main bot)
         self.get_status: Optional[Callable] = None
         self.get_positions: Optional[Callable] = None
@@ -64,6 +67,12 @@ class TelegramNotifier:
         self.get_regime: Optional[Callable] = None  # Market regime analysis
         self.toggle_summary: Optional[Callable] = None  # Toggle summary notifications
         self.get_summary_status: Optional[Callable] = None  # Get summary status
+        # NEW: Enhanced module callbacks
+        self.get_risk_stats: Optional[Callable] = None  # Risk manager stats
+        self.get_mtf_analysis: Optional[Callable] = None  # Multi-timeframe analysis
+        self.run_backtest: Optional[Callable] = None  # Run backtest
+        self.get_chart: Optional[Callable] = None  # Generate chart
+        self.get_equity_curve: Optional[Callable] = None  # Equity curve data
         
         # Trading control state
         self.paused = False
@@ -76,13 +85,24 @@ class TelegramNotifier:
             elif not chat_valid:
                 logger.info("Telegram bot disabled - valid TELEGRAM_CHAT_ID not set")
         else:
-            self.bot = Bot(token=self.token)
-            logger.info("Telegram bot initialized")
+            # Defer Bot initialization to avoid Python 3.14 anyio import issues
+            # Bot will be created in start() method instead
+            self.bot = None
+            logger.info("Telegram bot initialized (deferred)")
     
     async def start(self):
         """Start the Telegram bot with command handlers."""
         if not self.enabled:
             return
+        
+        # Create Bot instance here (deferred from __init__)
+        if self.bot is None:
+            try:
+                self.bot = Bot(token=self.token)
+            except Exception as e:
+                logger.error(f"Failed to create Telegram Bot: {e}")
+                self.enabled = False
+                return
         
         self.app = Application.builder().token(self.token).build()
         
@@ -110,6 +130,11 @@ class TelegramNotifier:
         self.app.add_handler(CommandHandler("ml", self._cmd_ml))
         self.app.add_handler(CommandHandler("regime", self._cmd_regime))
         self.app.add_handler(CommandHandler("summary", self._cmd_summary))
+        # NEW: Enhanced commands
+        self.app.add_handler(CommandHandler("risk", self._cmd_risk))
+        self.app.add_handler(CommandHandler("mtf", self._cmd_mtf))
+        self.app.add_handler(CommandHandler("backtest", self._cmd_backtest))
+        self.app.add_handler(CommandHandler("chart", self._cmd_chart))
         
         # Add callback query handler for inline buttons
         self.app.add_handler(CallbackQueryHandler(self._handle_callback))
@@ -127,6 +152,22 @@ class TelegramNotifier:
                 logger.error(f"Telegram error: {error}")
         
         self.app.add_error_handler(error_handler)
+        
+        # Record startup time to ignore old messages
+        from datetime import datetime, timezone
+        self.startup_time = datetime.now(timezone.utc)
+        
+        # Clear any pending updates before starting (prevents processing old /stop commands)
+        try:
+            # Fetch and discard any pending updates
+            updates = await self.bot.get_updates(offset=-1, timeout=1)
+            if updates:
+                # Get the latest update_id and mark all previous as read
+                latest_id = updates[-1].update_id
+                await self.bot.get_updates(offset=latest_id + 1, timeout=1)
+                logger.info(f"Cleared {len(updates)} pending Telegram updates")
+        except Exception as e:
+            logger.debug(f"Could not clear pending updates: {e}")
         
         # Start polling in background with infinite retries for conflicts
         await self.app.initialize()
@@ -380,6 +421,7 @@ _Keep trading smart! 🤖_
 /signals - Recent signals detected
 /market - Current market info
 /ai - AI filter statistics
+/chart - Price chart with levels
 
 🤖 *AI Mode Commands:*
 /aimode - View current AI mode
@@ -394,7 +436,13 @@ _Keep trading smart! 🤖_
 /intel - View intelligent trading features
 /ml - Machine learning classifier stats
 /regime - Current market regime analysis
-/summary - Toggle summary notifications on/off
+/risk - Risk manager status & limits
+/mtf - Multi-timeframe analysis
+
+📉 *Analysis Commands:*
+/backtest - Backtest strategy (7 days)
+/backtest 30 - Backtest with custom days
+/summary - Toggle summary notifications
 
 ⚙️ *Control Commands:*
 /pause - Pause trading
@@ -676,6 +724,177 @@ Use /summary again to turn on.
         
         await update.message.reply_text(msg, parse_mode="Markdown")
 
+    # ============== NEW ENHANCED COMMANDS ==============
+
+    async def _cmd_risk(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /risk command - show risk manager status."""
+        if self.get_risk_stats:
+            r = self.get_risk_stats()
+            
+            can_trade_emoji = "✅" if r.get('can_trade') else "🛑"
+            mode_emoji = {
+                'NORMAL': '✅',
+                'REDUCED': '⚠️',
+                'CAUTIOUS': '🟡',
+                'SEVERE': '🟠',
+                'EMERGENCY': '🔴'
+            }.get(r.get('dd_mode', 'NORMAL'), '❓')
+            
+            msg = f"""
+🎯 *Risk Manager Status*
+
+{can_trade_emoji} *Trading:* {'Allowed' if r.get('can_trade') else 'BLOCKED'}
+{mode_emoji} *Mode:* `{r.get('dd_mode', 'NORMAL')}`
+📊 *Reason:* {r.get('can_trade_reason', 'OK')}
+
+*Position Sizing:*
+├ Base Risk: `{r.get('base_risk', 2):.2%}`
+├ Kelly Optimal: `{r.get('kelly_risk', 0.02):.2%}`
+└ Adjusted Risk: `{r.get('adjusted_risk', 0.02):.2%}`
+
+*Performance:*
+├ Win Rate: `{r.get('win_rate', 0):.1%}`
+├ Streak: {r.get('consecutive_wins', 0)}W / {r.get('consecutive_losses', 0)}L
+└ Total Trades: `{r.get('total_trades', 0)}`
+
+*Limits:*
+├ Daily P&L: `${r.get('daily_pnl', 0):+.2f}`
+├ Weekly P&L: `${r.get('weekly_pnl', 0):+.2f}`
+├ Daily Limit: {'🛑 HIT' if r.get('daily_limit_hit') else '✅ OK'}
+└ Weekly Limit: {'🛑 HIT' if r.get('weekly_limit_hit') else '✅ OK'}
+"""
+        else:
+            msg = "⚠️ Risk manager not available"
+        
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    async def _cmd_mtf(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /mtf command - multi-timeframe analysis."""
+        if self.get_mtf_analysis:
+            r = self.get_mtf_analysis()
+            
+            if r.get('error'):
+                msg = f"⚠️ {r['error']}"
+            else:
+                conf_emoji = "✅" if r.get('confirmed') else "❌"
+                
+                # Primary timeframe
+                primary = r.get('primary', {})
+                trend_3m = primary.get('trend', {}).get('direction', 'unknown')
+                
+                # Secondary timeframe
+                secondary = r.get('secondary', {})
+                trend_15m = secondary.get('trend', {}).get('direction', 'N/A') if secondary.get('trend') else 'N/A'
+                
+                # Higher timeframe
+                higher = r.get('higher', {})
+                trend_1h = higher.get('trend', {}).get('direction', 'N/A') if higher.get('trend') else 'N/A'
+                
+                msg = f"""
+📊 *Multi-Timeframe Analysis*
+
+{conf_emoji} *Confirmation:* `{r.get('recommendation', 'WAIT')}`
+📈 *Confluence:* `{r.get('confluence_pct', 0)}%`
+🎯 *Alignment Score:* `{r.get('alignment_score', 0):.2f}`
+
+*Timeframe Trends:*
+├ 3m: `{trend_3m.upper()}`
+├ 15m: `{trend_15m.upper() if trend_15m != 'N/A' else 'N/A'}`
+└ 1H: `{trend_1h.upper() if trend_1h != 'N/A' else 'N/A'}`
+
+*Volume:*
+└ Ratio: `{r.get('volume', {}).get('volume_ratio', 1.0):.2f}x` ({r.get('volume', {}).get('trend', 'normal')})
+
+*Confirmations:* {len(r.get('confirmations', []))}
+{chr(10).join('✅ ' + c for c in r.get('confirmations', [])[:3]) or '_None_'}
+
+*Conflicts:* {len(r.get('conflicts', []))}
+{chr(10).join('⚠️ ' + c for c in r.get('conflicts', [])[:3]) or '_None_'}
+
+💡 _{r.get('message', '')}_
+"""
+        else:
+            msg = "⚠️ MTF analysis not available"
+        
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    async def _cmd_backtest(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /backtest command - run historical backtest."""
+        if not self.run_backtest:
+            await update.message.reply_text("⚠️ Backtest not available")
+            return
+        
+        # Parse days argument
+        days = 7
+        if context.args:
+            try:
+                days = int(context.args[0])
+                days = min(max(days, 1), 90)  # Clamp to 1-90 days
+            except ValueError:
+                pass
+        
+        await update.message.reply_text(f"⏳ Running {days}-day backtest... This may take a moment.")
+        
+        try:
+            result = await self.run_backtest(days)
+            
+            if result.get('error'):
+                msg = f"❌ Backtest failed: {result['error']}"
+            else:
+                mc = result.get('monte_carlo', {})
+                
+                pnl_emoji = "📈" if result.get('total_pnl', 0) >= 0 else "📉"
+                
+                msg = f"""
+📊 *Backtest Results ({days} days)*
+
+{pnl_emoji} *Performance:*
+├ Total P&L: `${result.get('total_pnl', 0):+,.2f}` ({result.get('total_pnl_pct', 0):+.1f}%)
+├ Win Rate: `{result.get('win_rate', 0):.1f}%`
+├ Profit Factor: `{result.get('profit_factor', 0):.2f}`
+└ Sharpe Ratio: `{result.get('sharpe_ratio', 0):.2f}`
+
+📈 *Trades:*
+├ Total: `{result.get('total_trades', 0)}`
+└ Max Drawdown: `{result.get('max_drawdown_pct', 0):.1f}%`
+
+🎲 *Monte Carlo ({mc.get('simulations', 0)} sims):*
+├ Median Final: `${mc.get('median_final_balance', 0):,.0f}`
+├ 5th Percentile: `${mc.get('percentile_5', 0):,.0f}`
+├ 95th Percentile: `${mc.get('percentile_95', 0):,.0f}`
+├ Prob of Profit: `{mc.get('probability_profit', 0):.0f}%`
+└ Worst-Case DD: `{mc.get('worst_case_drawdown', 0):.1f}%`
+"""
+        except Exception as e:
+            msg = f"❌ Backtest error: {str(e)}"
+        
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    async def _cmd_chart(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /chart command - generate and send price chart."""
+        if not self.get_chart:
+            await update.message.reply_text("⚠️ Chart generation not available")
+            return
+        
+        await update.message.reply_text("📊 Generating chart...")
+        
+        try:
+            chart_bytes = self.get_chart()
+            
+            if chart_bytes:
+                from io import BytesIO
+                await self.bot.send_photo(
+                    chat_id=self.chat_id,
+                    photo=BytesIO(chart_bytes),
+                    caption="📊 *Current Price Chart*\nBlue=Entry, Red=SL, Green=TP",
+                    parse_mode="Markdown"
+                )
+            else:
+                await update.message.reply_text("⚠️ Could not generate chart (insufficient data or matplotlib not installed)")
+        except Exception as e:
+            logger.error(f"Chart command error: {e}")
+            await update.message.reply_text(f"❌ Chart error: {str(e)}")
+
     async def _cmd_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /balance command."""
         if self.get_balance:
@@ -789,7 +1008,17 @@ Use /summary again to turn on.
         await update.message.reply_text(msg, parse_mode="Markdown")
 
     async def _cmd_stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /stop command."""
+        """Handle /stop command - only process if message is recent (after bot startup)."""
+        from datetime import datetime, timezone, timedelta
+        
+        # Check if message is from before bot startup (old queued message)
+        msg_time = update.message.date
+        if self.startup_time and msg_time:
+            # Allow 10 second grace period for clock drift
+            if msg_time < self.startup_time - timedelta(seconds=10):
+                logger.info(f"Ignoring old /stop command from {msg_time} (startup was {self.startup_time})")
+                return
+        
         await update.message.reply_text(
             "⚠️ *Stopping bot...*\n\nThe bot will shut down gracefully.",
             parse_mode="Markdown"
@@ -907,28 +1136,155 @@ Example: `/aimode advisory`""",
         """Handle regular text messages - chat with AI."""
         user_message = update.message.text
         
-        # Get trading context for the AI
+        # Build AI context from SINGLE SOURCE OF TRUTH: full_state
         context_info = ""
-        if self.get_status:
-            status = self.get_status()
-            context_info += f"Bot Status: {'Connected' if status.get('connected') else 'Disconnected'}, "
-            context_info += f"Mode: {status.get('mode', 'Unknown')}, "
-            context_info += f"Balance: ${status.get('balance', 0):,.2f}\n"
+        full_state = None
         
-        if self.get_positions:
-            positions = self.get_positions()
-            if positions:
-                context_info += f"Open Position: {positions[0]['side']} {positions[0]['symbol']}\n"
-            else:
-                context_info += "No open positions\n"
+        # Get full system state - this is the ONLY source of context for AI
+        if hasattr(self, 'get_full_system_state') and self.get_full_system_state:
+            try:
+                full_state = self.get_full_system_state()
+                
+                # Parameters
+                params = full_state.get('parameters', {})
+                context_info += f"SYSTEM PARAMETERS:\n"
+                context_info += f"  Risk: {params.get('risk_pct', 0.02)*100:.1f}% | ATR Mult: {params.get('atr_mult', 2.0)}\n"
+                context_info += f"  TP Levels: {params.get('tp1_r', 1)}R/{params.get('tp2_r', 2)}R/{params.get('tp3_r', 3)}R\n"
+                context_info += f"  AI Mode: {params.get('ai_mode', 'filter')} | AI Confidence: {params.get('ai_confidence', 0.7)*100:.0f}%\n"
+                context_info += f"  Paused: {params.get('paused', False)}\n"
+                context_info += f"  Daily Loss Limit: {params.get('daily_loss_limit', 0.05)*100:.1f}%"
+                if params.get('daily_loss_triggered'):
+                    context_info += " ⚠️ TRIGGERED"
+                context_info += "\n"
+                context_info += f"  Dry-Run Mode: {params.get('dry_run_mode', False)}\n\n"
+                
+                # Status (from full_state.status)
+                status = full_state.get('status', {})
+                context_info += f"BOT STATUS:\n"
+                context_info += f"  Connected: {'Yes' if status.get('connected') else 'No'}\n"
+                context_info += f"  Mode: {status.get('mode', 'Unknown')}\n"
+                context_info += f"  Uptime: {status.get('uptime', 'N/A')}\n"
+                context_info += f"  Balance: ${status.get('balance', 0):,.2f} (Initial: ${status.get('initial_balance', 0):,.2f})\n"
+                context_info += f"  Total Trades: {status.get('total_trades', 0)} | Win Rate: {status.get('win_rate', 0):.1f}%\n\n"
+                
+                # Position (from full_state.position)
+                positions = full_state.get('position', [])
+                if positions and len(positions) > 0:
+                    pos = positions[0]
+                    context_info += f"OPEN POSITION:\n"
+                    context_info += f"  {pos.get('side', 'N/A')} {pos.get('symbol', 'N/A')}\n"
+                    context_info += f"  Entry: ${pos.get('entry', 0):,.4f} | Size: {pos.get('size', 0):.4f}\n"
+                    context_info += f"  Unrealized P&L: ${pos.get('pnl', 0):,.2f}\n\n"
+                else:
+                    context_info += "POSITION: None\n\n"
+                
+                # P&L (from full_state.pnl)
+                pnl = full_state.get('pnl', {})
+                context_info += f"P&L:\n"
+                context_info += f"  Today: ${pnl.get('today', 0):,.2f}\n"
+                context_info += f"  Total: ${pnl.get('total', 0):,.2f}\n"
+                context_info += f"  Win Rate: {pnl.get('win_rate', 0)*100:.1f}%\n"
+                context_info += f"  Total Trades: {pnl.get('trades', 0)} ({pnl.get('winning', 0)} wins)\n\n"
+                
+                # Market (from full_state.market)
+                market = full_state.get('market', {})
+                if market.get('price', 0) > 0:
+                    context_info += f"MARKET:\n"
+                    context_info += f"  {market.get('symbol', 'N/A')}: ${market.get('price', 0):,.4f}\n"
+                    context_info += f"  24h Change: {market.get('change_24h', 0):.2f}%\n"
+                    context_info += f"  ATR: ${market.get('atr', 0):,.4f}\n\n"
+                
+                # ML Model (from full_state.ml)
+                ml = full_state.get('ml', {})
+                samples = ml.get('total_samples', 0)
+                samples_until = ml.get('samples_until_training', 50)
+                is_trained = ml.get('is_trained', False)
+                
+                context_info += f"ML MODEL:\n"
+                if is_trained:
+                    win_rate = ml.get('historical_win_rate', 0)
+                    context_info += f"  Status: Trained ✅\n"
+                    context_info += f"  Samples: {samples}\n"
+                    context_info += f"  Historical Win Rate: {win_rate*100:.0f}%\n"
+                else:
+                    context_info += f"  Status: Learning\n"
+                    context_info += f"  Progress: {samples}/{samples + samples_until} samples ({samples_until} more needed)\n"
+                context_info += "\n"
+                
+                # Regime
+                context_info += f"MARKET REGIME: {full_state.get('regime', 'unknown')}\n\n"
+                
+                # Recent signals
+                signals = full_state.get('signals', [])
+                if signals:
+                    context_info += f"RECENT SIGNALS ({len(signals)}):\n"
+                    for sig in signals[-3:]:
+                        context_info += f"  • {sig.get('direction', 'N/A')} @ {sig.get('time', 'N/A')}\n"
+                    context_info += "\n"
+                    
+            except Exception as e:
+                logger.warning(f"Could not get full system state: {e}")
+                # Fallback to individual getters only if full_state fails
+                if self.get_status:
+                    status = self.get_status()
+                    context_info += f"Bot Status: {'Connected' if status.get('connected') else 'Disconnected'}, "
+                    context_info += f"Balance: ${status.get('balance', 0):,.2f}\n"
         
-        if self.get_market:
-            market = self.get_market()
-            if market.get('price', 0) > 0:
-                context_info += f"Current Price: ${market.get('price', 0):,.4f}\n"
+        # Check for PARAMETER CHANGE commands (set risk 3%, change mode to autonomous, etc)
+        msg_lower = user_message.lower()
+        param_change_result = None
+        
+        logger.info(f"🔧 Checking for param changes in: '{msg_lower}'")
+        
+        if hasattr(self, 'set_system_param') and self.set_system_param:
+            import re
+            # Match patterns like "set risk to 3%", "change ai confidence to 80%", "set tp1 to 1.5"
+            set_patterns = [
+                (r'set\s+risk\s+(?:to\s+)?(\d+(?:\.\d+)?)\s*%?', 'risk_pct', lambda x: float(x)/100),
+                (r'(?:set|change)\s+(?:ai\s+)?confidence\s+(?:to\s+)?(\d+(?:\.\d+)?)\s*%?', 'ai_confidence', lambda x: float(x)/100),
+                (r'(?:set|change)\s+(?:ai\s+)?mode\s+(?:to\s+)?(\w+)', 'ai_mode', str),
+                (r'set\s+atr\s+(?:mult(?:iplier)?\s+)?(?:to\s+)?(\d+(?:\.\d+)?)', 'atr_mult', float),
+                (r'set\s+tp1\s+(?:to\s+)?(\d+(?:\.\d+)?)', 'tp1_r', float),
+                (r'set\s+tp2\s+(?:to\s+)?(\d+(?:\.\d+)?)', 'tp2_r', float),
+                (r'set\s+tp3\s+(?:to\s+)?(\d+(?:\.\d+)?)', 'tp3_r', float),
+                (r'(?:pause|stop)\s+(?:the\s+)?(?:bot|trading)', 'paused', lambda x: True),
+                (r'(?:resume|start|unpause)\s+(?:the\s+)?(?:bot|trading)', 'paused', lambda x: False),
+                # More flexible patterns for mode changes - these catch various phrasings
+                (r'\bautonomous\b', 'ai_mode', lambda x: 'autonomous'),
+                (r'\bfilter\b(?!\s+mode)', 'ai_mode', lambda x: 'filter'),
+                (r'\bhybrid\b', 'ai_mode', lambda x: 'hybrid'),
+                (r'\badvisory\b', 'ai_mode', lambda x: 'advisory'),
+                (r'switch\s+(?:to\s+)?(\w+)', 'ai_mode', str),
+                (r'mode\s*[=:]\s*(\w+)', 'ai_mode', str),
+                (r'go\s+(?:to\s+)?(\w+)\s+mode', 'ai_mode', str),
+                (r'enable\s+(\w+)\s+mode', 'ai_mode', str),
+                (r'use\s+(\w+)\s+mode', 'ai_mode', str),
+            ]
+            
+            for pattern, param, converter in set_patterns:
+                match = re.search(pattern, msg_lower)
+                if match:
+                    try:
+                        # Handle patterns with and without capture groups
+                        if match.groups() and match.group(1):
+                            value = converter(match.group(1))
+                        else:
+                            value = converter(True)
+                        logger.info(f"🔧 Matched pattern '{pattern}' → {param}={value}")
+                        param_change_result = self.set_system_param(param, value)
+                        if param_change_result.get('success'):
+                            context_info += f"\n\n✅ PARAMETER CHANGED: {param_change_result.get('message')}"
+                            logger.info(f"✅ Parameter change success: {param_change_result.get('message')}")
+                        else:
+                            context_info += f"\n\n❌ PARAMETER CHANGE FAILED: {param_change_result.get('message')}"
+                            logger.warning(f"❌ Parameter change failed: {param_change_result.get('message')}")
+                        break
+                    except Exception as e:
+                        logger.error(f"Parameter change error: {e}")
+        else:
+            logger.warning("🔧 set_system_param not available!")
         
         # Check for trade execution requests
-        msg_lower = user_message.lower()
         trade_keywords_long = ["buy", "go long", "open long", "enter long", "long now", "buy now", 
                                "execute long", "execute buy", "yes buy", "yes long", "do it", "execute",
                                "execute trade", "make the trade", "open the trade", "enter the trade"]
@@ -945,8 +1301,8 @@ Example: `/aimode advisory`""",
         
         # Execute trade if requested
         if (should_execute_long or should_execute_short) and self.execute_ai_trade:
-            logger.info(f"⚡ Attempting to execute {side} trade via AI chat")
             side = "long" if should_execute_long else "short"
+            logger.info(f"⚡ Attempting to execute {side} trade via AI chat")
             result = await self.execute_ai_trade(side)
             
             logger.info(f"💼 Trade result: {result}")
@@ -973,7 +1329,12 @@ Example: `/aimode advisory`""",
         if self.chat_with_ai:
             try:
                 response = await self.chat_with_ai(user_message, context_info)
-                await update.message.reply_text(response, parse_mode="Markdown")
+                # Try sending with Markdown, fall back to plain text if parsing fails
+                try:
+                    await update.message.reply_text(response, parse_mode="Markdown")
+                except Exception as markdown_error:
+                    logger.warning(f"Markdown parsing failed, sending as plain text: {markdown_error}")
+                    await update.message.reply_text(response)
             except Exception as e:
                 logger.error(f"AI chat error: {e}")
                 await update.message.reply_text(

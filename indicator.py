@@ -320,10 +320,10 @@ class MarketRegime:
 
 def generate_signals(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Generate trading signals with mathematical regime filtering.
+    Enhanced signal generation with multi-factor confluence.
     
-    Strategy: SMA(15) / SMA(40) crossover
-    Filter: Only trade when ADX > 25 (proven profitable regime)
+    Strategy: SMA(15) / SMA(40) crossover + RSI + Volume + BTC alignment
+    Filters: ADX regime, volume confirmation, momentum confluence
     """
     df = df.copy()
     
@@ -357,19 +357,374 @@ def generate_signals(df: pd.DataFrame) -> pd.DataFrame:
     short_condition = (df['SMA15'] < df['SMA40']) & (df['SMA15'].shift(1) >= df['SMA40'].shift(1))
     df.loc[short_condition, 'Side'] = -1
     
-    # MATHEMATICAL FILTER: Only allow signals in favorable regimes
+    # ENHANCED FILTERING (only if we have enough data)
     if len(df) >= 50:
         adx = calculate_adx(df)
+        rsi = calculate_rsi(df['close'])
+        current_rsi = rsi.iloc[-1] if len(rsi) > 0 else 50
         
-        # ADX > 25 filter (proven through backtest)
-        if adx < 25:
-            # Cancel signals in ranging market
-            signal_rows = df['Side'] != 0
-            if signal_rows.any():
-                logger.debug(f"Signals filtered: ADX={adx:.1f} < 25 (ranging market)")
+        # Get volume features
+        vol_features = calculate_volume_features(df)
+        volume_ratio = vol_features.get('volume_ratio', 1.0)
+        
+        # Get BTC alignment
+        btc_features = calculate_btc_correlation(df)
+        btc_correlation = btc_features.get('btc_correlation', 0)
+        
+        signal_rows = df['Side'] != 0
+        
+        if signal_rows.any():
+            filter_reasons = []
+            should_filter = False
+            
+            # FILTER 1: ADX regime (adaptive threshold)
+            # Lower threshold if other factors are strong
+            adx_threshold = 20 if volume_ratio > 1.5 else 25
+            if adx < adx_threshold:
+                filter_reasons.append(f"ADX={adx:.1f} < {adx_threshold}")
+                should_filter = True
+            
+            # FILTER 2: Volume confirmation
+            # Require at least 0.5x average volume for signals
+            if volume_ratio < 0.5:
+                filter_reasons.append(f"Low volume ({volume_ratio:.2f}x avg)")
+                should_filter = True
+            
+            # FILTER 3: RSI extremes confirmation
+            # Don't go long if overbought, don't short if oversold
+            last_signal = df.loc[signal_rows, 'Side'].iloc[-1] if signal_rows.any() else 0
+            if last_signal == 1 and current_rsi > 75:
+                filter_reasons.append(f"RSI overbought ({current_rsi:.0f})")
+                should_filter = True
+            elif last_signal == -1 and current_rsi < 25:
+                filter_reasons.append(f"RSI oversold ({current_rsi:.0f})")
+                should_filter = True
+            
+            # FILTER 4: BTC alignment (if highly correlated)
+            # If LINK correlates >0.7 with BTC, check BTC trend
+            if abs(btc_correlation) > 0.7:
+                try:
+                    btc_df = _fetch_btc_data_sync()
+                    if btc_df is not None and len(btc_df) >= 20:
+                        btc_sma_fast = btc_df['close'].rolling(10).mean().iloc[-1]
+                        btc_sma_slow = btc_df['close'].rolling(30).mean().iloc[-1]
+                        btc_bullish = btc_sma_fast > btc_sma_slow
+                        
+                        # Don't short LINK when BTC is bullish (high correlation)
+                        if last_signal == -1 and btc_bullish and btc_correlation > 0.7:
+                            filter_reasons.append("BTC bullish (high correlation)")
+                            should_filter = True
+                        # Don't long LINK when BTC is bearish (high correlation)
+                        elif last_signal == 1 and not btc_bullish and btc_correlation > 0.7:
+                            filter_reasons.append("BTC bearish (high correlation)")
+                            should_filter = True
+                except Exception as e:
+                    logger.debug(f"BTC filter error: {e}")
+            
+            if should_filter:
+                logger.debug(f"Signals filtered: {', '.join(filter_reasons)}")
                 df.loc[signal_rows, 'Side'] = 0
+            else:
+                # Log confluence factors for signal
+                confluence = []
+                if adx >= 25:
+                    confluence.append(f"ADX={adx:.0f}")
+                if volume_ratio >= 1.0:
+                    confluence.append(f"Vol={volume_ratio:.1f}x")
+                if (last_signal == 1 and current_rsi < 50) or (last_signal == -1 and current_rsi > 50):
+                    confluence.append(f"RSI={current_rsi:.0f}")
+                logger.info(f"Signal confirmed with confluence: {', '.join(confluence)}")
     
     return df
+
+
+def generate_mean_reversion_signals(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Mean-Reversion Strategy for RANGING markets.
+    
+    Uses Bollinger Bands + RSI for mean-reversion entries.
+    Only activates when ADX < 25 (non-trending market).
+    """
+    df = df.copy()
+    
+    # Normalize column names
+    col_map = {}
+    for col in df.columns:
+        if col.lower() == 'close':
+            col_map[col] = 'close'
+    df = df.rename(columns=col_map)
+    
+    if len(df) < 50:
+        df['MR_Side'] = 0
+        return df
+    
+    closes = df['close']
+    
+    # Calculate Bollinger Bands
+    sma20 = closes.rolling(20).mean()
+    std20 = closes.rolling(20).std()
+    bb_upper = sma20 + (std20 * 2)
+    bb_lower = sma20 - (std20 * 2)
+    
+    # Calculate RSI
+    rsi = calculate_rsi(closes, period=14)
+    
+    # Check if we're in a ranging market (ADX < 25)
+    adx = calculate_adx(df)
+    is_ranging = adx < 25
+    
+    df['MR_Side'] = 0
+    
+    if not is_ranging:
+        return df  # Only use mean-reversion in ranging markets
+    
+    # Mean-reversion signals:
+    # Long: Price touches lower BB + RSI < 30 (oversold)
+    # Short: Price touches upper BB + RSI > 70 (overbought)
+    
+    for i in range(20, len(df)):
+        price = closes.iloc[i]
+        current_rsi = rsi.iloc[i]
+        lower_band = bb_lower.iloc[i]
+        upper_band = bb_upper.iloc[i]
+        
+        # Long signal: oversold bounce
+        if price <= lower_band and current_rsi < 30:
+            df.iloc[i, df.columns.get_loc('MR_Side')] = 1
+        # Short signal: overbought reversal  
+        elif price >= upper_band and current_rsi > 70:
+            df.iloc[i, df.columns.get_loc('MR_Side')] = -1
+    
+    return df
+
+
+def generate_regime_aware_signals(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """
+    Generate signals based on market regime.
+    
+    - TRENDING (ADX >= 25): Use SMA crossover (trend-following)
+    - RANGING (ADX < 25): Use mean-reversion (Bollinger + RSI)
+    - CHOPPY (Hurst < 0.4): No trades
+    
+    Returns (df_with_signals, regime_info)
+    """
+    if len(df) < 50:
+        df['Side'] = 0
+        return df, {'regime': 'UNKNOWN', 'strategy': 'none'}
+    
+    # Get regime classification
+    regime = MarketRegime.classify(df)
+    regime_type = regime['regime']
+    adx = regime['adx']
+    hurst = regime['hurst']
+    
+    # CHOPPY: Don't trade
+    if regime_type == 'CHOPPY' or hurst < 0.4:
+        df['Side'] = 0
+        return df, {
+            'regime': 'CHOPPY',
+            'strategy': 'NO_TRADE',
+            'reason': f'Choppy market (Hurst={hurst:.2f})',
+            'adx': adx,
+            'hurst': hurst
+        }
+    
+    # RANGING: Use mean-reversion
+    if regime_type == 'RANGING' or adx < 25:
+        df = generate_mean_reversion_signals(df)
+        df['Side'] = df['MR_Side']
+        return df, {
+            'regime': 'RANGING',
+            'strategy': 'MEAN_REVERSION',
+            'reason': f'Ranging market (ADX={adx:.1f})',
+            'adx': adx,
+            'hurst': hurst
+        }
+    
+    # TRENDING: Use SMA crossover
+    df = generate_signals(df)
+    return df, {
+        'regime': regime_type,
+        'strategy': 'TREND_FOLLOWING',
+        'reason': f'Trending market (ADX={adx:.1f})',
+        'adx': adx,
+        'hurst': hurst
+    }
+
+
+def smart_btc_filter(df: pd.DataFrame, signal: int, btc_df: pd.DataFrame = None) -> Dict[str, Any]:
+    """
+    Smarter BTC correlation filter that considers:
+    1. Rolling correlation (not just static)
+    2. Relative strength (LINK vs BTC momentum)
+    3. Divergence opportunities
+    
+    Returns dict with filter decision and reasoning.
+    """
+    result = {
+        'should_filter': False,
+        'reason': None,
+        'btc_trend': 'neutral',
+        'correlation': 0,
+        'relative_strength': 0,
+        'divergence': False
+    }
+    
+    try:
+        btc_features = calculate_btc_correlation(df, btc_df)
+        correlation = btc_features['btc_correlation']
+        relative_strength = btc_features['btc_relative_strength']
+        beta = btc_features['btc_beta']
+        
+        result['correlation'] = correlation
+        result['relative_strength'] = relative_strength
+        
+        # Get BTC trend
+        if btc_df is None:
+            btc_df = _fetch_btc_data_sync()
+        
+        if btc_df is None or len(btc_df) < 20:
+            return result
+        
+        btc_closes = btc_df['close']
+        btc_sma_fast = btc_closes.rolling(10).mean().iloc[-1]
+        btc_sma_slow = btc_closes.rolling(30).mean().iloc[-1]
+        btc_bullish = btc_sma_fast > btc_sma_slow
+        btc_rsi = calculate_rsi(btc_closes).iloc[-1]
+        
+        result['btc_trend'] = 'bullish' if btc_bullish else 'bearish'
+        result['btc_rsi'] = btc_rsi
+        
+        # === SMART FILTER LOGIC ===
+        
+        # Case 1: High correlation (> 0.7) - follow BTC
+        if correlation > 0.7:
+            if signal == 1 and not btc_bullish:
+                result['should_filter'] = True
+                result['reason'] = f"High BTC correlation ({correlation:.2f}), BTC bearish"
+            elif signal == -1 and btc_bullish:
+                result['should_filter'] = True
+                result['reason'] = f"High BTC correlation ({correlation:.2f}), BTC bullish"
+        
+        # Case 2: Negative correlation (< -0.3) - inverse relationship
+        elif correlation < -0.3:
+            # Inverse logic: long LINK when BTC is weak
+            if signal == 1 and btc_bullish and relative_strength < -5:
+                result['should_filter'] = True
+                result['reason'] = f"Negative correlation, BTC outperforming"
+        
+        # Case 3: Divergence opportunity
+        # LINK showing strength while BTC weak, or vice versa
+        if abs(correlation) < 0.5 and abs(relative_strength) > 3:
+            result['divergence'] = True
+            if signal == 1 and relative_strength > 3:
+                result['should_filter'] = False  # LINK leading, good for longs
+                result['reason'] = f"LINK outperforming BTC (RS={relative_strength:.1f}%)"
+            elif signal == -1 and relative_strength < -3:
+                result['should_filter'] = False  # LINK lagging, good for shorts
+                result['reason'] = f"LINK underperforming BTC (RS={relative_strength:.1f}%)"
+        
+        # Case 4: BTC extreme RSI - be cautious
+        if btc_rsi > 80 and signal == 1:
+            result['should_filter'] = True
+            result['reason'] = f"BTC overbought (RSI={btc_rsi:.0f}), risky for longs"
+        elif btc_rsi < 20 and signal == -1:
+            result['should_filter'] = True
+            result['reason'] = f"BTC oversold (RSI={btc_rsi:.0f}), risky for shorts"
+            
+    except Exception as e:
+        logger.debug(f"Smart BTC filter error: {e}")
+    
+    return result
+
+
+def generate_signals_with_details(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """
+    Generate signals and return detailed analysis.
+    Returns (df_with_signals, analysis_dict)
+    """
+    df_signals = generate_signals(df)
+    
+    analysis = {
+        'signal': 0,
+        'confluence_score': 0,
+        'filters_passed': [],
+        'filters_failed': [],
+        'recommendation': 'WAIT'
+    }
+    
+    if len(df) < 50:
+        analysis['recommendation'] = 'INSUFFICIENT_DATA'
+        return df_signals, analysis
+    
+    # Get current signal
+    last_signal = df_signals['Side'].iloc[-1]
+    analysis['signal'] = int(last_signal)
+    
+    # Calculate confluence
+    adx = calculate_adx(df)
+    rsi = calculate_rsi(df['close']).iloc[-1]
+    vol_features = calculate_volume_features(df)
+    btc_features = calculate_btc_correlation(df)
+    momentum = calculate_momentum_divergence(df)
+    
+    confluence = 0
+    
+    # ADX strength
+    if adx >= 30:
+        confluence += 2
+        analysis['filters_passed'].append(f'Strong trend (ADX={adx:.0f})')
+    elif adx >= 25:
+        confluence += 1
+        analysis['filters_passed'].append(f'Trending (ADX={adx:.0f})')
+    else:
+        analysis['filters_failed'].append(f'Weak trend (ADX={adx:.0f})')
+    
+    # Volume
+    if vol_features['volume_ratio'] >= 1.2:
+        confluence += 2
+        analysis['filters_passed'].append(f"High volume ({vol_features['volume_ratio']:.1f}x)")
+    elif vol_features['volume_ratio'] >= 0.8:
+        confluence += 1
+        analysis['filters_passed'].append(f"Normal volume ({vol_features['volume_ratio']:.1f}x)")
+    else:
+        analysis['filters_failed'].append(f"Low volume ({vol_features['volume_ratio']:.1f}x)")
+    
+    # RSI alignment
+    if last_signal == 1:
+        if rsi < 40:
+            confluence += 2
+            analysis['filters_passed'].append(f'RSI favorable ({rsi:.0f})')
+        elif rsi < 60:
+            confluence += 1
+    elif last_signal == -1:
+        if rsi > 60:
+            confluence += 2
+            analysis['filters_passed'].append(f'RSI favorable ({rsi:.0f})')
+        elif rsi > 40:
+            confluence += 1
+    
+    # Momentum
+    if abs(momentum['momentum_strength']) > 1:
+        if (last_signal == 1 and momentum['momentum_strength'] > 0) or \
+           (last_signal == -1 and momentum['momentum_strength'] < 0):
+            confluence += 1
+            analysis['filters_passed'].append(f"Momentum aligned")
+    
+    analysis['confluence_score'] = confluence
+    
+    # Recommendation
+    if last_signal != 0:
+        if confluence >= 4:
+            analysis['recommendation'] = 'STRONG_ENTRY'
+        elif confluence >= 2:
+            analysis['recommendation'] = 'ENTRY'
+        else:
+            analysis['recommendation'] = 'WEAK_ENTRY'
+    else:
+        analysis['recommendation'] = 'NO_SIGNAL'
+    
+    return df_signals, analysis
 
 
 def get_regime_analysis(df_or_closes, atr: float = 0) -> Dict[str, Any]:
@@ -670,11 +1025,195 @@ def get_intelligence_summary(
 
 # ============== MACHINE LEARNING REGIME CLASSIFIER ==============
 
+# Global cache for BTC data (shared across calls to reduce API hits)
+_btc_cache = {'data': None, 'timestamp': 0}
+
+
+def _fetch_btc_data_sync() -> Optional[pd.DataFrame]:
+    """Fetch BTC/USDT data for correlation analysis (synchronous for ML)."""
+    import time
+    global _btc_cache
+    
+    # Cache for 5 minutes
+    if _btc_cache['data'] is not None and (time.time() - _btc_cache['timestamp']) < 300:
+        return _btc_cache['data']
+    
+    try:
+        import ccxt
+        exchange = ccxt.mexc({'enableRateLimit': True})
+        ohlcv = exchange.fetch_ohlcv('BTC/USDT', '5m', limit=100)
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        _btc_cache['data'] = df
+        _btc_cache['timestamp'] = time.time()
+        return df
+    except Exception as e:
+        logger.debug(f"Could not fetch BTC data: {e}")
+        return None
+
+
+def calculate_volume_features(df: pd.DataFrame) -> Dict[str, float]:
+    """Calculate volume-based features."""
+    try:
+        volume = df['volume'] if 'volume' in df.columns else df.get('Volume', pd.Series([1]))
+        if len(volume) < 20:
+            return {'volume_ratio': 1.0, 'volume_trend': 0.0, 'volume_spike': 0.0}
+        
+        # Volume ratio: current vs 20-period average
+        vol_ma = volume.rolling(20).mean()
+        volume_ratio = volume.iloc[-1] / vol_ma.iloc[-1] if vol_ma.iloc[-1] > 0 else 1.0
+        
+        # Volume trend: slope of volume MA
+        vol_ma_recent = vol_ma.tail(10)
+        if len(vol_ma_recent) >= 2:
+            volume_trend = (vol_ma_recent.iloc[-1] - vol_ma_recent.iloc[0]) / vol_ma_recent.iloc[0] * 100
+        else:
+            volume_trend = 0.0
+        
+        # Volume spike: max volume in last 5 bars vs average
+        vol_max_5 = volume.tail(5).max()
+        volume_spike = vol_max_5 / vol_ma.iloc[-1] if vol_ma.iloc[-1] > 0 else 1.0
+        
+        return {
+            'volume_ratio': float(np.clip(volume_ratio, 0, 10)),
+            'volume_trend': float(np.clip(volume_trend, -100, 100)),
+            'volume_spike': float(np.clip(volume_spike, 0, 10))
+        }
+    except Exception as e:
+        logger.debug(f"Volume feature error: {e}")
+        return {'volume_ratio': 1.0, 'volume_trend': 0.0, 'volume_spike': 0.0}
+
+
+def calculate_btc_correlation(df: pd.DataFrame, btc_df: Optional[pd.DataFrame] = None) -> Dict[str, float]:
+    """Calculate correlation with BTC price movements."""
+    try:
+        if btc_df is None:
+            btc_df = _fetch_btc_data_sync()
+        
+        if btc_df is None or len(btc_df) < 20:
+            return {'btc_correlation': 0.0, 'btc_beta': 1.0, 'btc_relative_strength': 0.0}
+        
+        closes = df['close'].values if 'close' in df.columns else df['Close'].values
+        btc_closes = btc_df['close'].values
+        
+        # Align lengths
+        min_len = min(len(closes), len(btc_closes), 50)
+        asset_returns = pd.Series(closes[-min_len:]).pct_change().dropna()
+        btc_returns = pd.Series(btc_closes[-min_len:]).pct_change().dropna()
+        
+        # Align again after pct_change
+        min_len = min(len(asset_returns), len(btc_returns))
+        asset_returns = asset_returns.tail(min_len)
+        btc_returns = btc_returns.tail(min_len)
+        
+        if len(asset_returns) < 10:
+            return {'btc_correlation': 0.0, 'btc_beta': 1.0, 'btc_relative_strength': 0.0}
+        
+        # Correlation
+        correlation = asset_returns.corr(btc_returns)
+        
+        # Beta (sensitivity to BTC moves)
+        if btc_returns.std() > 0:
+            beta = asset_returns.cov(btc_returns) / btc_returns.var()
+        else:
+            beta = 1.0
+        
+        # Relative strength: asset performance vs BTC over period
+        asset_perf = (closes[-1] - closes[-min_len]) / closes[-min_len] * 100
+        btc_perf = (btc_closes[-1] - btc_closes[-min_len]) / btc_closes[-min_len] * 100
+        relative_strength = asset_perf - btc_perf
+        
+        return {
+            'btc_correlation': float(np.clip(correlation, -1, 1)) if not np.isnan(correlation) else 0.0,
+            'btc_beta': float(np.clip(beta, 0, 5)) if not np.isnan(beta) else 1.0,
+            'btc_relative_strength': float(np.clip(relative_strength, -50, 50)) if not np.isnan(relative_strength) else 0.0
+        }
+    except Exception as e:
+        logger.debug(f"BTC correlation error: {e}")
+        return {'btc_correlation': 0.0, 'btc_beta': 1.0, 'btc_relative_strength': 0.0}
+
+
+def calculate_momentum_divergence(df: pd.DataFrame) -> Dict[str, float]:
+    """Detect divergence between price and RSI momentum."""
+    try:
+        closes = df['close'] if 'close' in df.columns else df['Close']
+        if len(closes) < 30:
+            return {'rsi_divergence': 0.0, 'momentum_strength': 0.0}
+        
+        rsi = calculate_rsi(closes)
+        
+        # Look at last 20 bars for divergence
+        price_recent = closes.tail(20)
+        rsi_recent = rsi.tail(20)
+        
+        # Simple divergence: price making new high but RSI not (bearish) or vice versa
+        price_slope = (price_recent.iloc[-1] - price_recent.iloc[0]) / price_recent.iloc[0] * 100
+        rsi_slope = rsi_recent.iloc[-1] - rsi_recent.iloc[0]
+        
+        # Divergence score: opposite directions = strong divergence
+        if price_slope > 0 and rsi_slope < 0:
+            divergence = -abs(price_slope)  # Bearish divergence
+        elif price_slope < 0 and rsi_slope > 0:
+            divergence = abs(price_slope)   # Bullish divergence
+        else:
+            divergence = 0.0
+        
+        # Momentum strength (rate of change)
+        momentum = closes.pct_change(10).iloc[-1] * 100 if len(closes) > 10 else 0.0
+        
+        return {
+            'rsi_divergence': float(np.clip(divergence, -20, 20)),
+            'momentum_strength': float(np.clip(momentum, -20, 20)) if not np.isnan(momentum) else 0.0
+        }
+    except Exception as e:
+        logger.debug(f"Momentum divergence error: {e}")
+        return {'rsi_divergence': 0.0, 'momentum_strength': 0.0}
+
+
+def calculate_microstructure_features(df: pd.DataFrame) -> Dict[str, float]:
+    """Calculate market microstructure features."""
+    try:
+        closes = df['close'] if 'close' in df.columns else df['Close']
+        highs = df['high'] if 'high' in df.columns else df['High']
+        lows = df['low'] if 'low' in df.columns else df['Low']
+        
+        if len(closes) < 30:
+            return {'volatility_clustering': 0.0, 'range_expansion': 0.0, 'trend_consistency': 0.0}
+        
+        # Volatility clustering: autocorrelation of squared returns
+        returns = closes.pct_change().dropna()
+        squared_returns = returns ** 2
+        vol_clustering = squared_returns.autocorr(lag=1) if len(squared_returns) > 5 else 0.0
+        
+        # Range expansion: current range vs average
+        ranges = highs - lows
+        avg_range = ranges.rolling(20).mean()
+        range_expansion = ranges.iloc[-1] / avg_range.iloc[-1] if avg_range.iloc[-1] > 0 else 1.0
+        
+        # Trend consistency: % of bars in trend direction
+        price_changes = closes.diff().tail(20)
+        up_bars = (price_changes > 0).sum()
+        down_bars = (price_changes < 0).sum()
+        trend_consistency = abs(up_bars - down_bars) / len(price_changes) if len(price_changes) > 0 else 0.0
+        
+        return {
+            'volatility_clustering': float(np.clip(vol_clustering, -1, 1)) if not np.isnan(vol_clustering) else 0.0,
+            'range_expansion': float(np.clip(range_expansion, 0, 5)),
+            'trend_consistency': float(np.clip(trend_consistency, 0, 1))
+        }
+    except Exception as e:
+        logger.debug(f"Microstructure error: {e}")
+        return {'volatility_clustering': 0.0, 'range_expansion': 0.0, 'trend_consistency': 0.0}
+
+
 class MLRegimeClassifier:
     """
-    Lightweight ML-based regime classifier using Gradient Boosting.
+    Enhanced ML-based regime classifier using Gradient Boosting.
+    Now with 22 features including volume, BTC correlation, and microstructure.
     Learns from trade outcomes to predict favorable conditions.
     """
+    
+    # Version for tracking feature changes
+    MODEL_VERSION = 2
     
     def __init__(self, model_path: str = "ml_regime_model.pkl"):
         self.model_path = model_path
@@ -682,11 +1221,29 @@ class MLRegimeClassifier:
         self.scaler = None
         self.is_trained = False
         self.training_data = []
-        self.min_samples_to_train = 50
+        # REDUCED: Per ML Acceleration Plan - collect data faster, train sooner
+        # Old: 300 (10 months at 1 trade/day)
+        # New: 50 (can start predicting sooner, gradual ramp-up of influence)
+        self.min_samples_to_train = 50  # Reduced from 300 per ML Acceleration Plan
+        self.min_cv_score = 0.55  # Minimum cross-validation score to use model
+        self._pending_milestone = None  # For async milestone notifications
+        self._cv_scores = []  # Track cross-validation scores
+        
+        # Enhanced feature set (22 features total)
         self.feature_names = [
+            # Original 10 features
             'adx', 'hurst', 'volatility_ratio', 'rsi',
             'price_vs_sma15', 'price_vs_sma40', 'sma_spread',
-            'recent_return_mean', 'recent_return_std', 'recent_max_dd'
+            'recent_return_mean', 'recent_return_std', 'recent_max_dd',
+            # Volume features (3)
+            'volume_ratio', 'volume_trend', 'volume_spike',
+            # BTC correlation features (3)
+            'btc_correlation', 'btc_beta', 'btc_relative_strength',
+            # Momentum divergence (2)
+            'rsi_divergence', 'momentum_strength',
+            # Microstructure features (4)
+            'volatility_clustering', 'range_expansion', 'trend_consistency',
+            'hour_of_day'
         ]
         self._load_model()
     
@@ -697,11 +1254,27 @@ class MLRegimeClassifier:
                 import pickle
                 with open(self.model_path, 'rb') as f:
                     saved = pickle.load(f)
-                    self.model = saved.get('model')
-                    self.scaler = saved.get('scaler')
-                    self.training_data = saved.get('training_data', [])
-                    self.is_trained = self.model is not None
-                    logger.info(f"ML model loaded: {len(self.training_data)} samples, trained={self.is_trained}")
+                    
+                    # Check model version for migration
+                    saved_version = saved.get('version', 1)
+                    
+                    if saved_version < self.MODEL_VERSION:
+                        # Old model with fewer features - need to reset
+                        logger.warning(f"ML model upgrade: v{saved_version} -> v{self.MODEL_VERSION}. Keeping samples but retraining required.")
+                        old_data = saved.get('training_data', [])
+                        # We can't use old samples with different feature counts
+                        # But we log how many were lost for transparency
+                        logger.info(f"Discarding {len(old_data)} old samples (incompatible features). Starting fresh with enhanced model.")
+                        self.model = None
+                        self.scaler = None
+                        self.training_data = []
+                        self.is_trained = False
+                    else:
+                        self.model = saved.get('model')
+                        self.scaler = saved.get('scaler')
+                        self.training_data = saved.get('training_data', [])
+                        self.is_trained = self.model is not None
+                        logger.info(f"ML model loaded: {len(self.training_data)} samples, trained={self.is_trained}")
             except Exception as e:
                 logger.warning(f"Could not load ML model: {e}")
     
@@ -712,18 +1285,23 @@ class MLRegimeClassifier:
                 pickle.dump({
                     'model': self.model,
                     'scaler': self.scaler,
-                    'training_data': self.training_data
+                    'training_data': self.training_data,
+                    'version': self.MODEL_VERSION
                 }, f)
         except Exception as e:
             logger.error(f"Could not save ML model: {e}")
     
     def extract_features(self, df: pd.DataFrame) -> Optional[np.ndarray]:
+        """Extract 22 features for ML prediction."""
         if len(df) < 50:
             return None
         
         try:
+            from datetime import datetime
+            
             closes = df['close'].values if 'close' in df.columns else df['Close'].values
             
+            # === Original 10 features ===
             adx = calculate_adx(df)
             hurst = calculate_hurst_exponent(pd.Series(closes))
             vol_regime = calculate_volatility_regime(pd.Series(closes))
@@ -750,24 +1328,84 @@ class MLRegimeClassifier:
                 recent_return_std = 1
                 recent_max_dd = 0
             
-            return np.array([
+            # === NEW: Volume features (3) ===
+            vol_features = calculate_volume_features(df)
+            
+            # === NEW: BTC correlation features (3) ===
+            btc_features = calculate_btc_correlation(df)
+            
+            # === NEW: Momentum divergence (2) ===
+            momentum_features = calculate_momentum_divergence(df)
+            
+            # === NEW: Microstructure features (3) ===
+            micro_features = calculate_microstructure_features(df)
+            
+            # === NEW: Time feature (1) ===
+            # Hour of day (0-23) normalized to -1 to 1
+            hour_of_day = datetime.utcnow().hour / 12.0 - 1.0  # Normalize to [-1, 1]
+            
+            # Build feature array (22 features total)
+            features = np.array([
+                # Original 10
                 adx, hurst, volatility_ratio, rsi,
                 price_vs_sma15, price_vs_sma40, sma_spread,
-                recent_return_mean, recent_return_std, recent_max_dd
+                recent_return_mean, recent_return_std, recent_max_dd,
+                # Volume (3)
+                vol_features['volume_ratio'],
+                vol_features['volume_trend'],
+                vol_features['volume_spike'],
+                # BTC correlation (3)
+                btc_features['btc_correlation'],
+                btc_features['btc_beta'],
+                btc_features['btc_relative_strength'],
+                # Momentum (2)
+                momentum_features['rsi_divergence'],
+                momentum_features['momentum_strength'],
+                # Microstructure (4)
+                micro_features['volatility_clustering'],
+                micro_features['range_expansion'],
+                micro_features['trend_consistency'],
+                hour_of_day
             ])
+            
+            # Replace any NaN/Inf with 0
+            features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
+            
+            return features
             
         except Exception as e:
             logger.error(f"Feature extraction error: {e}")
             return None
     
-    def record_sample(self, df: pd.DataFrame, outcome: bool):
+    def record_sample(self, df: pd.DataFrame, outcome: bool, notifier=None):
+        """Record a trade sample for ML learning.
+        
+        Args:
+            df: DataFrame with market data at entry
+            outcome: True for win, False for loss
+            notifier: Optional TelegramNotifier for milestone notifications
+        """
         features = self.extract_features(df)
         if features is not None:
             self.training_data.append((features, 1 if outcome else 0))
-            logger.debug(f"ML sample recorded: outcome={'WIN' if outcome else 'LOSS'}, total={len(self.training_data)}")
+            samples = len(self.training_data)
+            logger.debug(f"ML sample recorded: outcome={'WIN' if outcome else 'LOSS'}, total={samples}")
             
-            if len(self.training_data) >= self.min_samples_to_train:
-                if len(self.training_data) % 20 == 0:
+            # === MILESTONE NOTIFICATIONS ===
+            milestones = [10, 25, 50, 75, 100, 150, 200]
+            if samples in milestones:
+                milestone_msg = f"🧠 ML Milestone: {samples} samples collected!"
+                if samples >= self.min_samples_to_train:
+                    milestone_msg += " Model is now trained."
+                else:
+                    remaining = self.min_samples_to_train - samples
+                    milestone_msg += f" {remaining} more needed to train."
+                logger.info(milestone_msg)
+                # Store milestone for later notification (async context needed)
+                self._pending_milestone = milestone_msg
+            
+            if samples >= self.min_samples_to_train:
+                if samples % 20 == 0:
                     self.train()
             
             self._save_model()
@@ -780,31 +1418,69 @@ class MLRegimeClassifier:
         try:
             from sklearn.ensemble import GradientBoostingClassifier
             from sklearn.preprocessing import StandardScaler
-            from sklearn.model_selection import cross_val_score
+            from sklearn.model_selection import cross_val_score, StratifiedKFold
             
             X = np.array([x[0] for x in self.training_data])
             y = np.array([x[1] for x in self.training_data])
             
             win_rate = y.mean()
-            logger.info(f"ML Training: {len(y)} samples, {win_rate:.1%} win rate")
+            logger.info(f"ML Training: {len(y)} samples, {win_rate:.1%} win rate, {len(self.feature_names)} features")
+            
+            # Check for class imbalance
+            n_wins = y.sum()
+            n_losses = len(y) - n_wins
+            if min(n_wins, n_losses) < 10:
+                logger.warning(f"ML: Class imbalance detected (wins: {n_wins}, losses: {n_losses}). Need more diverse samples.")
             
             self.scaler = StandardScaler()
             X_scaled = self.scaler.fit_transform(X)
             
+            # Enhanced model with regularization
             self.model = GradientBoostingClassifier(
-                n_estimators=50, max_depth=3, learning_rate=0.1,
-                min_samples_split=5, min_samples_leaf=3, random_state=42
+                n_estimators=100,       # Increased from 50
+                max_depth=4,            # Increased from 3
+                learning_rate=0.05,     # Reduced for better generalization
+                min_samples_split=10,   # Increased from 5
+                min_samples_leaf=5,     # Increased from 3
+                subsample=0.8,          # Stochastic gradient boosting
+                max_features='sqrt',    # Feature subsampling per tree
+                random_state=42,
+                validation_fraction=0.1,  # NEW: Hold-out validation for early stopping
+                n_iter_no_change=10      # NEW: Stop if no improvement for 10 iterations
             )
             
-            if len(y) >= 30:
-                cv_scores = cross_val_score(self.model, X_scaled, y, cv=5, scoring='accuracy')
-                logger.info(f"ML CV Accuracy: {cv_scores.mean():.1%} (+/- {cv_scores.std()*2:.1%})")
+            # Stratified Cross-Validation (maintains class balance)
+            if len(y) >= 50 and min(n_wins, n_losses) >= 10:
+                try:
+                    cv_folds = min(5, min(n_wins, n_losses))  # Ensure each fold has both classes
+                    skf = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=42)
+                    cv_scores = cross_val_score(self.model, X_scaled, y, cv=skf, scoring='accuracy')
+                    cv_mean = cv_scores.mean()
+                    cv_std = cv_scores.std()
+                    
+                    logger.info(f"ML Stratified CV ({cv_folds}-fold): {cv_mean:.1%} (+/- {cv_std*2:.1%})")
+                    
+                    # Warning if overfitting suspected
+                    if cv_std > 0.15:
+                        logger.warning(f"ML: High variance in CV scores ({cv_std:.1%}). Model may be overfitting.")
+                    
+                    # Warning if poor performance
+                    if cv_mean < 0.55:
+                        logger.warning(f"ML: Low CV accuracy ({cv_mean:.1%}). Model has weak predictive power.")
+                    
+                except ValueError as e:
+                    logger.debug(f"ML CV skipped: {e}")
             
             self.model.fit(X_scaled, y)
             self.is_trained = True
             
+            # Training set accuracy
+            train_acc = self.model.score(X_scaled, y)
+            logger.info(f"ML Training accuracy: {train_acc:.1%}")
+            
+            # Log top 5 features
             importances = dict(zip(self.feature_names, self.model.feature_importances_))
-            top_features = sorted(importances.items(), key=lambda x: x[1], reverse=True)[:3]
+            top_features = sorted(importances.items(), key=lambda x: x[1], reverse=True)[:5]
             logger.info(f"ML Top features: {', '.join([f'{k}={v:.2f}' for k,v in top_features])}")
             
             self._save_model()
@@ -815,6 +1491,8 @@ class MLRegimeClassifier:
             return False
         except Exception as e:
             logger.error(f"ML training error: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
             return False
     
     def predict(self, df: pd.DataFrame) -> Dict[str, Any]:
@@ -866,7 +1544,16 @@ class MLRegimeClassifier:
             'total_samples': len(self.training_data),
             'is_trained': self.is_trained,
             'min_samples_needed': self.min_samples_to_train,
-            'samples_until_training': max(0, self.min_samples_to_train - len(self.training_data))
+            'samples_until_training': max(0, self.min_samples_to_train - len(self.training_data)),
+            'model_version': self.MODEL_VERSION,
+            'num_features': len(self.feature_names),
+            'feature_categories': {
+                'original': 10,
+                'volume': 3,
+                'btc_correlation': 3,
+                'momentum': 2,
+                'microstructure': 4
+            }
         }
         
         if self.training_data:
@@ -879,6 +1566,7 @@ class MLRegimeClassifier:
             try:
                 importances = dict(zip(self.feature_names, self.model.feature_importances_))
                 stats['top_features'] = sorted(importances.items(), key=lambda x: x[1], reverse=True)[:5]
+                stats['all_features'] = self.feature_names
             except:
                 pass
         

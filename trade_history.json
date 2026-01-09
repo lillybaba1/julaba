@@ -1,24 +1,9 @@
 {
-  "recent_trades": [
-    {
-      "result": "loss",
-      "pnl": -247.05882352941407,
-      "time": "23:04:03"
-    },
-    {
-      "result": "loss",
-      "pnl": -202.2832244008777,
-      "time": "05:28:05"
-    },
-    {
-      "result": "loss",
-      "pnl": -222.84868554829717,
-      "time": "06:12:01"
-    }
-  ],
+  "recent_trades": [],
   "total_wins": 0,
-  "total_losses": 3,
+  "total_losses": 0,
   "consecutive_wins": 0,
-  "consecutive_losses": 3,
-  "last_updated": "2026-01-08T06:12:01.212739"
+  "consecutive_losses": 0,
+  "last_updated": "2026-01-09T00:00:00",
+  "notes": "Reset after R/R fix - TP targets increased to 1.5/2.5/4.0R"
 }
