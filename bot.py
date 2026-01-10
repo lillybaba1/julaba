@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass, field
@@ -946,11 +947,11 @@ Format with markdown for readability."""
                 return {"recommendation": "No market data available.", "best_pair": ""}
             
             # Check if we have a valid cached recommendation
-            now = datetime.now(timezone.utc)
+            now = time.time()
             cache = self._ai_market_cache
             
             if cache["recommendation"] and cache["timestamp"]:
-                cache_age = (now - cache["timestamp"]).total_seconds()
+                cache_age = now - cache["timestamp"]
                 
                 # Check if cache is still valid (under 5 minutes)
                 if cache_age < self.AI_MARKET_CACHE_DURATION:
