@@ -51,17 +51,18 @@ class AISignalFilter:
     STRICT MODE: Higher threshold, skeptic prompt, loss cooldown.
     """
     
-    def __init__(self, confidence_threshold: float = 0.80, notifier=None):
+    def __init__(self, confidence_threshold: float = 0.65, notifier=None):
         """
         Initialize the AI Signal Filter.
         
         Args:
             confidence_threshold: Minimum confidence (0-1) required to approve a trade
+                                 (LOWERED to 0.65 for faster sample collection)
             notifier: Optional TelegramNotifier instance for notifications
         """
         self.confidence_threshold = confidence_threshold
         self.notifier = notifier
-        self.loss_cooldown_threshold = 0.90  # Require 90% after a loss
+        self.loss_cooldown_threshold = 0.80  # Lowered from 0.90 for faster sample collection
         self.api_key = os.getenv("GEMINI_API_KEY", "")
         self.use_ai = bool(self.api_key and "your_" not in self.api_key.lower() and GENAI_AVAILABLE)
         self.trade_history = []
@@ -147,6 +148,14 @@ class AISignalFilter:
             self.consecutive_wins = 0
         
         logger.info(f"Trade recorded: {result} ${pnl:+.2f} | Streak: {self.consecutive_wins}W / {self.consecutive_losses}L")
+
+    def record_system_message(self, message: str):
+        """Record a system-level event to the chat history."""
+        self.chat_history.append({
+            "role": "model",
+            "content": f"[SYSTEM EVENT]: {message}"
+        })
+        self._save_chat_history()
 
     def _ai_analysis(
         self,
@@ -894,6 +903,10 @@ AVAILABLE PARAMETERS YOU CAN CHANGE:
 - daily_loss_limit: Max daily loss (0.01 to 0.20) - e.g., 0.05 = 5%
 - paused: Pause/resume bot (true/false)
 - dry_run_mode: Paper trading mode (true/false)
+- multi_pair_enabled: Enable/disable multi-pair mode (true/false)
+- add_pair: Add a pair to multi-pair list - e.g., "ETH/USDT"
+- remove_pair: Remove a pair from multi-pair list - e.g., "SOL/USDT"
+- auto_switch: Enable/disable autonomous pair switching (true/false)
 
 SUPPORTED SYMBOLS: BTC, ETH, SOL, LINK, AVAX, MATIC, DOT, ADA, XRP, DOGE, ARB, OP, APT, SUI, PEPE, WIF, BONK, INJ, TIA, SEI, NEAR, UNI, AAVE, and more (all paired with USDT)
 
@@ -921,7 +934,7 @@ You can include MULTIPLE command blocks if needed!
 - You CAN change the symbol! Just use: {{"action": "set_param", "param": "symbol", "value": "BTC/USDT"}}
 - Cannot change symbol while in a position (close first)
 
-CURRENT SYSTEM STATUS (THIS IS THE TRUTH):
+🔥 REALITY CHECK - CURRENT SYSTEM STATUS (IGNORE PAST CHAT HISTORY IF CONTRADICTORY):
 {trading_context if trading_context else "No active trading session"}
 {history_text}
 

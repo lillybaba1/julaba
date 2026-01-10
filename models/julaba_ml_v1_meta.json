@@ -10,18 +10,28 @@
     "entry_day_of_week",
     "regime_trending",
     "regime_choppy",
-    "regime_weak_trending"
+    "regime_weak_trending",
+    "entry_rsi_slope",
+    "entry_macd_hist",
+    "entry_price_momentum",
+    "entry_atr_expansion",
+    "entry_bb_position",
+    "entry_volume_trend",
+    "entry_candle_strength",
+    "is_london_session",
+    "is_nyc_session",
+    "is_asia_session"
   ],
   "metrics": {
-    "accuracy": 0.5454545454545454,
+    "accuracy": 0.6,
     "auc_roc": 0.5,
-    "cv_accuracy_mean": 0.475,
-    "cv_accuracy_std": 0.1224744871391589,
-    "total_samples": 51,
-    "train_samples": 40,
-    "test_samples": 11,
-    "win_rate_actual": 0.5490196078431373,
-    "trained_at": "2026-01-09T20:30:55.337228",
+    "cv_accuracy_mean": 0.5071428571428571,
+    "cv_accuracy_std": 0.20095435566621714,
+    "total_samples": 49,
+    "train_samples": 39,
+    "test_samples": 10,
+    "win_rate_actual": 0.5714285714285714,
+    "trained_at": "2026-01-10T23:12:15.789070",
     "feature_importance": {
       "entry_atr_percent": 0.0,
       "entry_rsi": 0.0,
@@ -33,9 +43,19 @@
       "entry_day_of_week": 0.0,
       "regime_trending": 0.0,
       "regime_choppy": 0.0,
-      "regime_weak_trending": 0.0
+      "regime_weak_trending": 0.0,
+      "entry_rsi_slope": 0.0,
+      "entry_macd_hist": 0.0,
+      "entry_price_momentum": 0.0,
+      "entry_atr_expansion": 0.0,
+      "entry_bb_position": 0.0,
+      "entry_volume_trend": 0.0,
+      "entry_candle_strength": 0.0,
+      "is_london_session": 0.0,
+      "is_nyc_session": 0.0,
+      "is_asia_session": 0.0
     }
   },
   "version": "1.0",
-  "saved_at": "2026-01-09T20:30:55.367645"
+  "saved_at": "2026-01-10T23:12:15.811982"
 }

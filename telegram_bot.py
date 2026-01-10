@@ -105,6 +105,7 @@ class TelegramNotifier:
         self.run_backtest: Optional[Callable] = None  # Run backtest
         self.get_chart: Optional[Callable] = None  # Generate chart
         self.get_equity_curve: Optional[Callable] = None  # Equity curve data
+        self.switch_symbol: Optional[Callable] = None  # Unified symbol switch
         
         # Trading control state
         self.paused = False
@@ -211,7 +212,11 @@ class TelegramNotifier:
         )
         
         logger.info("Telegram bot started - listening for commands")
-        await self.send_message("🤖 *Julaba Bot Started*\n\nType /help for commands")
+        
+        # Only send startup message once (not on reconnect)
+        if not getattr(self, '_startup_notified', False):
+            self._startup_notified = True
+            await self.send_message("🤖 *Julaba Bot Started*\n\nType /help for commands")
     
     async def stop(self):
         """Stop the Telegram bot."""
@@ -1243,6 +1248,34 @@ Example: `/aimode advisory`""",
                     context_info += f"  Progress: {samples}/{samples + samples_until} samples ({samples_until} more needed)\n"
                 context_info += "\n"
                 
+                # AI Stats (from full_state.ai)
+                ai_stats = full_state.get('ai', {})
+                context_info += f"AI FILTER:\n"
+                context_info += f"  Mode: {ai_stats.get('mode', 'unknown')}\n"
+                context_info += f"  Threshold: {ai_stats.get('threshold', 0.7)*100:.0f}%\n"
+                context_info += f"  Approved: {ai_stats.get('approved', 0)} | Rejected: {ai_stats.get('rejected', 0)}\n"
+                context_info += "\n"
+                
+                # AI Tracker (from full_state.ai_tracker)
+                ai_tracker = full_state.get('ai_tracker', {})
+                if ai_tracker.get('total_tracked', 0) > 0:
+                    context_info += f"AI ACCURACY TRACKER:\n"
+                    context_info += f"  Total Decisions: {ai_tracker.get('total_tracked', 0)}\n"
+                    context_info += f"  Approval Rate: {ai_tracker.get('approval_rate', 'N/A')}\n"
+                    context_info += f"  Approval Accuracy: {ai_tracker.get('approval_accuracy', 'N/A')}\n"
+                    context_info += f"  Net AI Value: {ai_tracker.get('net_ai_value', '$0.00')}\n"
+                    context_info += "\n"
+                
+                # Pre-filter stats (from full_state.prefilter)
+                prefilter = full_state.get('prefilter', {})
+                if prefilter.get('total_signals', 0) > 0:
+                    context_info += f"PRE-FILTER STATS:\n"
+                    context_info += f"  Total Signals: {prefilter.get('total_signals', 0)}\n"
+                    context_info += f"  Passed to AI: {prefilter.get('passed', 0)}\n"
+                    context_info += f"  Pass Rate: {prefilter.get('pass_rate', '0%')}\n"
+                    context_info += f"  Blocked: Score={prefilter.get('blocked_by_score', 0)}, ADX Low={prefilter.get('blocked_by_adx_low', 0)}, ADX Danger={prefilter.get('blocked_by_adx_danger', 0)}, Volume={prefilter.get('blocked_by_volume', 0)}\n"
+                    context_info += "\n"
+                
                 # Regime
                 context_info += f"MARKET REGIME: {full_state.get('regime', 'unknown')}\n\n"
                 
@@ -1290,12 +1323,16 @@ Example: `/aimode advisory`""",
                 (r'set\s+tp3\s+(?:to\s+)?(\d+(?:\.\d+)?)', 'tp3_r', float),
                 (r'(?:pause|stop)\s+(?:the\s+)?(?:bot|trading)', 'paused', lambda x: True),
                 (r'(?:resume|start|unpause)\s+(?:the\s+)?(?:bot|trading)', 'paused', lambda x: False),
+                # Symbol/pair switching patterns
+                (r'(?:switch|change|trade)\s+(?:to\s+)?(?:symbol\s+)?([A-Za-z]{2,6})(?:/usdt|usdt)?(?:\s|$)', 'symbol', str),
+                (r'(?:set|change)\s+(?:symbol|pair)\s+(?:to\s+)?([A-Za-z]{2,6})', 'symbol', str),
+                (r'trade\s+([A-Za-z]{2,6})(?:/usdt|usdt)?(?:\s|$)', 'symbol', str),
                 # More flexible patterns for mode changes - these catch various phrasings
                 (r'\bautonomous\b', 'ai_mode', lambda x: 'autonomous'),
                 (r'\bfilter\b(?!\s+mode)', 'ai_mode', lambda x: 'filter'),
                 (r'\bhybrid\b', 'ai_mode', lambda x: 'hybrid'),
                 (r'\badvisory\b', 'ai_mode', lambda x: 'advisory'),
-                (r'switch\s+(?:to\s+)?(\w+)', 'ai_mode', str),
+                (r'switch\s+(?:to\s+)?(?!btc|eth|sol|link|tia|sui)(\w+)\s*mode', 'ai_mode', str),  # Avoid matching coin names
                 (r'mode\s*[=:]\s*(\w+)', 'ai_mode', str),
                 (r'go\s+(?:to\s+)?(\w+)\s+mode', 'ai_mode', str),
                 (r'enable\s+(\w+)\s+mode', 'ai_mode', str),

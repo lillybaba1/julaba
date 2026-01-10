@@ -18,11 +18,40 @@ Julaba is an advanced trading bot system with AI-powered signal filtering, Teleg
 2. **Set up environment**
    - Create a `.env` file with your API keys and configuration as needed by the bot.
 
-3. **Run the bot**
-   - Execute `python bot.py` to start the Julaba trading bot.
+3. **Install as systemd service** (Recommended)
+   - Run `sudo bash install_service.sh` to install as a system service.
+   - The bot will auto-start on boot and auto-restart on crashes.
 
-4. **Read Julaba state**
-   - Run `python julaba_reader.py` to print the contents of Julaba's persistent state/history files (if any).
+4. **Manual run** (Alternative)
+   - Execute `python bot.py --dashboard` to start with web dashboard.
+
+## Quick Commands
+
+The bot includes a simple command tool for quick management:
+
+```bash
+j s          # Service status
+j start      # Start bot
+j stop       # Stop bot
+j r          # Restart bot
+j l          # Live logs
+j la         # AI logs only
+j lt         # Trade logs only
+
+j b          # Check balance
+j p          # Check position
+j ai         # Check AI mode
+j pnl        # Show P&L
+j perf       # Performance metrics
+
+j ml         # ML model stats
+j trades     # Last trades
+j err        # Recent errors
+j check      # Health check
+j backup     # Run backup
+```
+
+Type `j` without arguments to see all available commands.
 
 ## Requirements
 - Python 3.8+

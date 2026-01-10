@@ -1359,12 +1359,97 @@ DASHBOARD_HTML = """
                         <span class="indicator-value" id="ml-samples">--</span>
                     </div>
                     <div class="indicator-row">
-                        <span class="indicator-name">Influence</span>
-                        <span class="indicator-value warning" id="ml-influence">--</span>
+                        <span class="indicator-name">Features</span>
+                        <span class="indicator-value info" id="ml-features">--</span>
                     </div>
                     <div class="indicator-row">
                         <span class="indicator-name">Last Prediction</span>
                         <span class="indicator-value" id="ml-last-pred">--</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- AI Decision Tracker -->
+            <div class="card-lg">
+                <div class="section-title-wrapper">
+                    <h2 class="section-title">🎯 AI Accuracy Tracker</h2>
+                    <button class="info-btn" onclick="askAiInfo('ai_tracker', 'AI Decision Tracker')" title="Ask AI about this">?</button>
+                </div>
+                <div id="ai-tracker-display">
+                    <div style="text-align: center; padding: 8px 0;">
+                        <span class="badge badge-info" id="ai-tracker-badge" style="font-size: 0.9rem; padding: 6px 14px;">TRACKING</span>
+                    </div>
+                    <div class="indicator-row">
+                        <span class="indicator-name">Total Decisions</span>
+                        <span class="indicator-value" id="tracker-total">0</span>
+                    </div>
+                    <div class="indicator-row">
+                        <span class="indicator-name">Approval Rate</span>
+                        <span class="indicator-value info" id="tracker-approval-rate">--</span>
+                    </div>
+                    <div class="indicator-row">
+                        <span class="indicator-name">Approval Accuracy</span>
+                        <span class="indicator-value" id="tracker-approval-accuracy">N/A</span>
+                    </div>
+                    <div class="indicator-row">
+                        <span class="indicator-name">Net AI Value</span>
+                        <span class="indicator-value" id="tracker-net-value">$0.00</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Pre-Filter Statistics -->
+            <div class="card-lg">
+                <div class="section-title-wrapper">
+                    <h2 class="section-title">🛡️ Pre-Filter Stats</h2>
+                    <button class="info-btn" onclick="askAiInfo('prefilter', 'Pre-Filter System')" title="Ask AI about this">?</button>
+                </div>
+                <div id="prefilter-display">
+                    <div style="text-align: center; padding: 8px 0;">
+                        <span class="badge" id="prefilter-badge" style="font-size: 0.9rem; padding: 6px 14px;">--% PASS</span>
+                    </div>
+                    <div class="indicator-row">
+                        <span class="indicator-name">Total Signals</span>
+                        <span class="indicator-value" id="prefilter-total">0</span>
+                    </div>
+                    <div class="indicator-row">
+                        <span class="indicator-name">Passed → AI</span>
+                        <span class="indicator-value positive" id="prefilter-passed">0</span>
+                    </div>
+                    <div class="indicator-row">
+                        <span class="indicator-name">Blocked (Score)</span>
+                        <span class="indicator-value negative" id="prefilter-score">0</span>
+                    </div>
+                    <div class="indicator-row">
+                        <span class="indicator-name">Blocked (ADX Low)</span>
+                        <span class="indicator-value negative" id="prefilter-adx-low">0</span>
+                    </div>
+                    <div class="indicator-row">
+                        <span class="indicator-name">Blocked (ADX Danger)</span>
+                        <span class="indicator-value negative" id="prefilter-adx-danger">0</span>
+                    </div>
+                    <div class="indicator-row">
+                        <span class="indicator-name">Blocked (Volume)</span>
+                        <span class="indicator-value negative" id="prefilter-volume">0</span>
+                    </div>
+                    <div class="indicator-row">
+                        <span class="indicator-name">Blocked (Confluence)</span>
+                        <span class="indicator-value negative" id="prefilter-confluence">0</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="grid-3">
+            <!-- Current Position -->
+            <div class="card-lg">
+                <div class="section-title-wrapper">
+                    <h2 class="section-title">💼 Current Position</h2>
+                    <button class="info-btn" onclick="askAiInfo('current_position', 'Current Position')" title="Ask AI about this">?</button>
+                </div>
+                <div id="position-display">
+                    <div class="signal-box neutral">
+                        <div class="signal-value">NO POSITION</div>
                     </div>
                 </div>
             </div>
@@ -1406,6 +1491,7 @@ DASHBOARD_HTML = """
                 <div class="section-title-wrapper" style="margin: 0; flex: 1;">
                     <h2 class="section-title">🔍 Market Scanner</h2>
                     <div style="display: flex; align-items: center; gap: 10px;">
+                        <span id="multi-pair-badge" style="display: none; background: linear-gradient(135deg, #9966ff, #00d4ff); color: #000; padding: 3px 8px; border-radius: 5px; font-size: 0.7rem; font-weight: bold; font-family: 'Orbitron', sans-serif;">MULTI-PAIR</span>
                         <span class="scanner-refresh-time" id="scanner-time">Updated: --</span>
                         <button class="ai-analyze-btn" id="ai-analyze-btn" onclick="aiAnalyzeMarkets()">
                             🤖 AI Analyze
@@ -1465,7 +1551,7 @@ DASHBOARD_HTML = """
                 <span id="hover-change" style="margin-left: auto;">--</span>
             </div>
             <div id="chart-wrapper" style="position: relative;">
-                <canvas id="priceChart" height="180"></canvas>
+                <canvas id="priceChart" height="120"></canvas>
                 <!-- Crosshair lines -->
                 <div id="crosshair-h" class="chart-crosshair-h" style="display: none;"></div>
                 <div id="crosshair-v" class="chart-crosshair-v" style="display: none;"></div>
@@ -1877,6 +1963,12 @@ DASHBOARD_HTML = """
                         currentSymbol = data.current_symbol || '';
                         updateMarketScanner(data.pairs, data.current_symbol);
                     }
+                    // Show multi-pair badge if enabled
+                    var mpBadge = document.getElementById('multi-pair-badge');
+                    if (mpBadge) {
+                        mpBadge.style.display = data.multi_pair_enabled ? 'inline-block' : 'none';
+                        if (data.multi_pair_count) mpBadge.textContent = 'MULTI (' + data.multi_pair_count + ')';
+                    }
                     var scanTime = document.getElementById('scanner-time');
                     if (scanTime) scanTime.textContent = 'Updated: ' + new Date().toLocaleTimeString();
                 })
@@ -1887,8 +1979,15 @@ DASHBOARD_HTML = """
             var grid = document.getElementById('scanner-grid');
             if (!grid || !pairs) return;
             
+            // Sort pairs: active symbol always first, then by score
+            var sortedPairs = pairs.slice().sort(function(a, b) {
+                if (a.symbol === activeSymbol) return -1;
+                if (b.symbol === activeSymbol) return 1;
+                return (b.score || 0) - (a.score || 0);
+            });
+            
             var html = '';
-            pairs.forEach(function(pair, idx) {
+            sortedPairs.forEach(function(pair, idx) {
                 var isActive = pair.symbol === activeSymbol;
                 var changeClass = pair.change >= 0 ? 'up' : 'down';
                 var changeSign = pair.change >= 0 ? '+' : '';
@@ -2589,7 +2688,7 @@ DASHBOARD_HTML = """
                         setText('ml-status', ml.status || 'Loaded');
                         setText('ml-accuracy', ((ml.accuracy || 0) * 100).toFixed(1) + '%');
                         setText('ml-samples', ml.samples || 0);
-                        setText('ml-influence', ((ml.influence || 0) * 100).toFixed(0) + '% (Advisory)');
+                        setText('ml-features', (ml.features || 24) + ' features');
                         if (ml.last_prediction) {
                             setText('ml-last-pred', ((ml.last_prediction.probability || 0.5) * 100).toFixed(0) + '% win');
                         }
@@ -2599,9 +2698,50 @@ DASHBOARD_HTML = """
                         setText('ml-status', 'Not Available');
                         setText('ml-accuracy', '--');
                         setText('ml-samples', '--');
-                        setText('ml-influence', '0%');
+                        setText('ml-features', '--');
                         setText('ml-last-pred', '--');
                     }
+                }
+                
+                // AI Decision Tracker
+                var tracker = data.ai_tracker || {};
+                setText('tracker-total', tracker.total_tracked || 0);
+                setText('tracker-approval-rate', tracker.approval_rate || '--');
+                var accEl = document.getElementById('tracker-approval-accuracy');
+                if (accEl) {
+                    var accVal = tracker.approval_accuracy || 'N/A';
+                    accEl.textContent = accVal;
+                    if (accVal !== 'N/A') {
+                        var accNum = parseFloat(accVal);
+                        if (accNum >= 60) accEl.className = 'indicator-value positive';
+                        else if (accNum >= 50) accEl.className = 'indicator-value warning';
+                        else accEl.className = 'indicator-value negative';
+                    }
+                }
+                var netEl = document.getElementById('tracker-net-value');
+                if (netEl) {
+                    var netVal = tracker.net_ai_value || '$0.00';
+                    netEl.textContent = netVal;
+                    netEl.className = 'indicator-value ' + (netVal.includes('+') ? 'positive' : netVal.includes('-') ? 'negative' : '');
+                }
+                
+                // Pre-Filter Statistics
+                var pf = data.prefilter || {};
+                setText('prefilter-total', pf.total_signals || 0);
+                setText('prefilter-passed', pf.passed || 0);
+                setText('prefilter-score', pf.blocked_by_score || 0);
+                setText('prefilter-adx-low', pf.blocked_by_adx_low || 0);
+                setText('prefilter-adx-danger', pf.blocked_by_adx_danger || 0);
+                setText('prefilter-volume', pf.blocked_by_volume || 0);
+                setText('prefilter-confluence', pf.blocked_by_confluence || 0);
+                var pfBadge = document.getElementById('prefilter-badge');
+                if (pfBadge) {
+                    var passRate = pf.pass_rate || '0%';
+                    pfBadge.textContent = passRate + ' PASS';
+                    var passNum = parseFloat(passRate);
+                    if (passNum >= 70) pfBadge.className = 'badge badge-success';
+                    else if (passNum >= 40) pfBadge.className = 'badge badge-warning';
+                    else pfBadge.className = 'badge badge-danger';
                 }
                 
                 // Position
@@ -2812,6 +2952,11 @@ class Dashboard:
         self.get_market_scan = None
         self.switch_symbol = None
         self.ai_analyze_markets = None
+        # NEW: AI tracker and pre-filter stats
+        self.get_ai_tracker_stats = None
+        self.get_prefilter_stats = None
+        # Full state callback
+        self.get_full_state = None
         
         if FLASK_AVAILABLE:
             self._setup_flask()
@@ -3099,6 +3244,11 @@ fetch('/api/data')
                 # NEW: ML and Logs
                 if self.get_ml_status:
                     data['ml'] = self.get_ml_status()
+                # NEW: AI tracker and pre-filter stats
+                if self.get_ai_tracker_stats:
+                    data['ai_tracker'] = self.get_ai_tracker_stats()
+                if self.get_prefilter_stats:
+                    data['prefilter'] = self.get_prefilter_stats()
             except Exception as e:
                 logger.error(f"Dashboard API error: {e}")
                 data['error'] = str(e)
@@ -3179,13 +3329,16 @@ fetch('/api/data')
         @self.app.route('/api/market-scan')
         def api_market_scan():
             """Get multi-pair market data for scanner."""
-            data = {'pairs': [], 'current_symbol': ''}
+            data = {'pairs': [], 'current_symbol': '', 'multi_pair_enabled': False, 'multi_pair_count': 0}
             
             try:
                 if self.get_market_scan:
                     scan_data = self.get_market_scan()
                     data['pairs'] = scan_data.get('pairs', [])
                     data['current_symbol'] = scan_data.get('current_symbol', '')
+                    data['multi_pair_enabled'] = scan_data.get('multi_pair_enabled', False)
+                    data['multi_pair_count'] = scan_data.get('multi_pair_count', 0)
+                    data['active_pairs'] = scan_data.get('active_pairs', [])
             except Exception as e:
                 logger.error(f"Dashboard market scan API error: {e}")
                 data['error'] = str(e)

@@ -60,6 +60,52 @@ class IndicatorCalculator:
             df['hour'] = df['timestamp'].dt.hour
             df['day_of_week'] = df['timestamp'].dt.dayofweek
         
+        # === NEW ML FEATURES ===
+        
+        # RSI momentum (slope over 5 periods)
+        df['rsi_slope'] = df['rsi'].diff(5) / 5
+        
+        # MACD
+        ema12 = df['close'].ewm(span=12, adjust=False).mean()
+        ema26 = df['close'].ewm(span=26, adjust=False).mean()
+        df['macd'] = ema12 - ema26
+        df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+        df['macd_hist'] = df['macd'] - df['macd_signal']
+        
+        # Price momentum (5-bar percentage change)
+        df['price_momentum'] = df['close'].pct_change(5) * 100
+        
+        # ATR expansion (current ATR vs 20-bar average)
+        atr_avg = df['atr'].rolling(window=20, min_periods=1).mean()
+        df['atr_expansion'] = df['atr'] / atr_avg.replace(0, 1)
+        
+        # Bollinger Band position (0 = lower band, 1 = upper band)
+        bb_sma = df['close'].rolling(window=20, min_periods=1).mean()
+        bb_std = df['close'].rolling(window=20, min_periods=1).std()
+        bb_upper = bb_sma + 2 * bb_std
+        bb_lower = bb_sma - 2 * bb_std
+        df['bb_position'] = (df['close'] - bb_lower) / (bb_upper - bb_lower).replace(0, 1)
+        df['bb_position'] = df['bb_position'].clip(0, 1)
+        
+        # Volume trend (5-bar volume momentum)
+        df['volume_trend'] = df['volume'].pct_change(5) * 100
+        
+        # Candle strength (-1 to 1, bearish to bullish)
+        candle_body = df['close'] - df['open']
+        candle_range = df['high'] - df['low']
+        df['candle_strength'] = candle_body / candle_range.replace(0, 1)
+        df['candle_strength'] = df['candle_strength'].clip(-1, 1)
+        
+        # Session detection (based on hour)
+        if 'hour' in df.columns:
+            df['is_london_session'] = ((df['hour'] >= 7) & (df['hour'] <= 16)).astype(int)
+            df['is_nyc_session'] = ((df['hour'] >= 13) & (df['hour'] <= 22)).astype(int)
+            df['is_asia_session'] = ((df['hour'] >= 0) & (df['hour'] <= 9)).astype(int)
+        else:
+            df['is_london_session'] = 0
+            df['is_nyc_session'] = 0
+            df['is_asia_session'] = 0
+        
         return df
     
     def _calculate_rsi(self, series: pd.Series, period: int = 14) -> pd.Series:
@@ -413,6 +459,18 @@ class BacktestSignalGenerator:
                 'entry_regime': row['regime'],
                 'entry_hour': row.get('hour', 12),
                 'entry_day_of_week': row.get('day_of_week', 0),
+                # NEW: Enhanced ML features
+                'entry_rsi_slope': row.get('rsi_slope', 0.0),
+                'entry_macd_hist': row.get('macd_hist', 0.0),
+                'entry_price_momentum': row.get('price_momentum', 0.0),
+                'entry_atr_expansion': row.get('atr_expansion', 1.0),
+                'entry_bb_position': row.get('bb_position', 0.5),
+                'entry_volume_trend': row.get('volume_trend', 0.0),
+                'entry_candle_strength': row.get('candle_strength', 0.0),
+                'is_london_session': row.get('is_london_session', 0),
+                'is_nyc_session': row.get('is_nyc_session', 0),
+                'is_asia_session': row.get('is_asia_session', 0),
+                # Trade levels and outcome
                 'stop_loss': levels['stop_loss'],
                 'tp1': levels['tp1'],
                 'tp2': levels['tp2'],

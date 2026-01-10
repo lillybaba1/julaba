@@ -35,18 +35,37 @@ class MLPredictor:
     Set influence_weight > 0 to let ML affect trade decisions.
     """
     
+    # Enhanced feature columns matching ml_trainer.py
     FEATURE_COLUMNS = [
+        # Core indicators
         'entry_atr_percent',
         'entry_rsi',
         'entry_adx',
         'entry_volume_ratio',
         'entry_hurst',
         'entry_sma_distance_percent',
+        # Time features
         'entry_hour',
         'entry_day_of_week',
+        # Regime one-hot
         'regime_trending',
         'regime_choppy',
         'regime_weak_trending',
+        # Momentum features
+        'entry_rsi_slope',
+        'entry_macd_hist',
+        'entry_price_momentum',
+        # Volatility context
+        'entry_atr_expansion',
+        'entry_bb_position',
+        # Volume context  
+        'entry_volume_trend',
+        # Pattern detection
+        'entry_candle_strength',
+        # Session context
+        'is_london_session',
+        'is_nyc_session',
+        'is_asia_session',
     ]
     
     def __init__(self, model_path: str = "./models/julaba_ml_v1.json"):
@@ -109,7 +128,7 @@ class MLPredictor:
     def prepare_features(self, signal: Dict[str, Any]) -> pd.DataFrame:
         """Convert signal dict to feature DataFrame."""
         
-        # Map signal fields to feature names
+        # Map signal fields to feature names - core indicators
         features = {
             'entry_atr_percent': signal.get('atr_percent', signal.get('entry_atr_percent', 0)),
             'entry_rsi': signal.get('rsi', signal.get('entry_rsi', 50)),
@@ -126,6 +145,27 @@ class MLPredictor:
         features['regime_trending'] = 1 if regime == 'TRENDING' else 0
         features['regime_choppy'] = 1 if regime == 'CHOPPY' else 0
         features['regime_weak_trending'] = 1 if regime == 'WEAK_TRENDING' else 0
+        
+        # NEW: Momentum features
+        features['entry_rsi_slope'] = signal.get('rsi_slope', signal.get('entry_rsi_slope', 0.0))
+        features['entry_macd_hist'] = signal.get('macd_hist', signal.get('entry_macd_hist', 0.0))
+        features['entry_price_momentum'] = signal.get('price_momentum', signal.get('entry_price_momentum', 0.0))
+        
+        # NEW: Volatility context
+        features['entry_atr_expansion'] = signal.get('atr_expansion', signal.get('entry_atr_expansion', 1.0))
+        features['entry_bb_position'] = signal.get('bb_position', signal.get('entry_bb_position', 0.5))
+        
+        # NEW: Volume context
+        features['entry_volume_trend'] = signal.get('volume_trend', signal.get('entry_volume_trend', 0.0))
+        
+        # NEW: Pattern detection
+        features['entry_candle_strength'] = signal.get('candle_strength', signal.get('entry_candle_strength', 0.0))
+        
+        # NEW: Session context
+        hour = features['entry_hour']
+        features['is_london_session'] = 1 if 7 <= hour <= 16 else signal.get('is_london_session', 0)
+        features['is_nyc_session'] = 1 if 13 <= hour <= 22 else signal.get('is_nyc_session', 0)
+        features['is_asia_session'] = 1 if 0 <= hour <= 9 else signal.get('is_asia_session', 0)
         
         # Create DataFrame
         df = pd.DataFrame([features])

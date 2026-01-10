@@ -34,18 +34,37 @@ except ImportError:
 class JulabaMLTrainer:
     """Train ML model for trade outcome prediction."""
     
+    # Enhanced feature columns with momentum and context features
     FEATURE_COLUMNS = [
+        # Core indicators
         'entry_atr_percent',
         'entry_rsi',
         'entry_adx',
         'entry_volume_ratio',
         'entry_hurst',
         'entry_sma_distance_percent',
+        # Time features
         'entry_hour',
         'entry_day_of_week',
+        # Regime one-hot
         'regime_trending',
         'regime_choppy',
         'regime_weak_trending',
+        # NEW: Momentum features
+        'entry_rsi_slope',      # RSI momentum (rising/falling)
+        'entry_macd_hist',       # MACD histogram value
+        'entry_price_momentum',  # Price change % over 5 bars
+        # NEW: Volatility context
+        'entry_atr_expansion',   # Is ATR expanding? (vs 20-bar avg)
+        'entry_bb_position',     # Position within Bollinger Bands (0-1)
+        # NEW: Volume context  
+        'entry_volume_trend',    # Volume trend (rising/falling)
+        # NEW: Pattern detection
+        'entry_candle_strength', # Bullish/bearish candle strength
+        # NEW: Session context
+        'is_london_session',     # London market hours
+        'is_nyc_session',        # NYC market hours
+        'is_asia_session',       # Asia market hours
     ]
     
     def __init__(self, model_dir: str = "./models"):
@@ -72,7 +91,7 @@ class JulabaMLTrainer:
             )
     
     def prepare_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Prepare feature matrix with one-hot encoding."""
+        """Prepare feature matrix with one-hot encoding and derived features."""
         df = df.copy()
         
         # One-hot encode regime
@@ -80,11 +99,28 @@ class JulabaMLTrainer:
         df['regime_choppy'] = (df['entry_regime'] == 'CHOPPY').astype(int)
         df['regime_weak_trending'] = (df['entry_regime'] == 'WEAK_TRENDING').astype(int)
         
+        # NEW: Fill missing momentum features with defaults
+        momentum_defaults = {
+            'entry_rsi_slope': 0.0,
+            'entry_macd_hist': 0.0,
+            'entry_price_momentum': 0.0,
+            'entry_atr_expansion': 1.0,
+            'entry_bb_position': 0.5,
+            'entry_volume_trend': 0.0,
+            'entry_candle_strength': 0.0,
+            'is_london_session': 0,
+            'is_nyc_session': 0,
+            'is_asia_session': 0,
+        }
+        for col, default in momentum_defaults.items():
+            if col not in df.columns:
+                df[col] = default
+        
         # Handle missing values
         for col in self.feature_columns:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
-                df[col] = df[col].fillna(df[col].median())
+                df[col] = df[col].fillna(df[col].median() if df[col].notna().any() else 0)
         
         return df
     

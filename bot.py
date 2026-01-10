@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass, field
 from pathlib import Path
+from logging.handlers import RotatingFileHandler
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -23,8 +24,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Configure logging with file output
+_logging_initialized = False
+
 def setup_logging(log_level: str = "INFO") -> None:
-    """Setup logging to both console and file."""
+    """Setup logging to both console and file. Only runs once."""
+    global _logging_initialized
+    if _logging_initialized:
+        return  # Prevent duplicate handlers
+    _logging_initialized = True  # Set immediately to prevent re-entry
+    
     log_dir = Path(__file__).parent
     log_file = log_dir / "julaba.log"
     
@@ -33,24 +41,37 @@ def setup_logging(log_level: str = "INFO") -> None:
         datefmt="%Y-%m-%d %H:%M:%S"
     )
     
+    # Clear any existing handlers first to prevent duplicates
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    
     # Console handler
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(formatter)
     console_handler.setLevel(getattr(logging, log_level.upper(), logging.INFO))
     
-    # File handler (always DEBUG for full history)
-    file_handler = logging.FileHandler(log_file, mode='a', encoding='utf-8')
+    # File handler with rotation (always DEBUG for full history)
+    file_handler = RotatingFileHandler(
+        log_file, 
+        mode='a', 
+        maxBytes=10*1024*1024,  # 10MB per file
+        backupCount=5,  # Keep 5 backup files
+        encoding='utf-8'
+    )
     file_handler.setFormatter(formatter)
     file_handler.setLevel(logging.DEBUG)
     
     # Configure root logger
-    root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)
     root_logger.addHandler(console_handler)
     root_logger.addHandler(file_handler)
     
     logging.info("="*60)
     logging.info("Log file: %s", log_file)
+
+# Initialize logging immediately when module loads
+setup_logging()
 
 logger = logging.getLogger("Julaba")
 
@@ -85,6 +106,7 @@ from dashboard import get_dashboard
 from chart_generator import get_chart_generator
 from ml_config import get_ml_config, get_multi_pair_config, MLConfig, MultiPairConfig, TradeLogSchema
 from ml_predictor import get_ml_predictor, MLPredictor
+from ai_tracker import get_ai_tracker, AIDecisionTracker
 
 # ============== Data Classes ==============
 
@@ -259,6 +281,18 @@ class Julaba:
         self.last_ai_self_adjust = None  # Rate limit self-adjustments
         self.ai_self_adjust_interval = 1800  # Check every 30 minutes
         
+        # === PRE-FILTER STATISTICS ===
+        self.prefilter_stats = {
+            'total_signals': 0,
+            'passed': 0,
+            'blocked_score': 0,
+            'blocked_adx_low': 0,
+            'blocked_adx_danger': 0,
+            'blocked_volume': 0,
+            'blocked_confluence': 0,
+            'by_regime': {}  # Track per-regime stats
+        }
+        
         # Trading state
         self.paper_mode = paper_balance is not None
         self.balance = paper_balance or 10000.0
@@ -288,7 +322,7 @@ class Julaba:
         self.btc_crash_cooldown = False
         self.btc_crash_cooldown_until = None
         self.btc_crash_threshold = -0.05  # -5% BTC drop
-        self.btc_crash_cooldown_minutes = 60  # 1 hour cooldown
+        self.btc_crash_cooldown_minutes = 30  # 30 min cooldown (was 60 - faster sample collection)
         self.last_btc_price = None
         
         # === DRY-RUN MODE ===
@@ -336,6 +370,8 @@ class Julaba:
         # Data
         self.bars_1m: List[Dict] = []
         self.bars_agg: pd.DataFrame = pd.DataFrame()
+        self._pending_data_refetch = False  # Flag to trigger refetch after symbol change
+        self._pending_switch_notification = None  # Queue for symbol switch notifications
         
         # Exchange
         self.exchange: Optional[ccxt.Exchange] = None
@@ -359,6 +395,13 @@ class Julaba:
             logger.info(f"🧠 ML Predictor loaded: {self.ml_predictor.metrics.get('accuracy', 0):.1%} accuracy")
         else:
             logger.info("🧠 ML Predictor: Model not loaded (will use when available)")
+        
+        # AI Decision Tracker (for measuring AI accuracy)
+        self.ai_tracker = get_ai_tracker()
+        logger.info(f"📊 AI Tracker: {len(self.ai_tracker.decisions)} historical decisions loaded")
+        
+        # Current decision ID for linking trades to AI decisions
+        self.current_decision_id: Optional[str] = None
         
         # Performance Dashboard (optional)
         self.dashboard = get_dashboard(port=5000)
@@ -386,7 +429,7 @@ class Julaba:
         self.telegram.get_status = self._get_status
         self.telegram.get_positions = self._get_positions
         self.telegram.get_pnl = self._get_pnl
-        self.telegram.get_ai_stats = lambda: self.ai_filter.get_stats()
+        self.telegram.get_ai_stats = self._get_ai_stats_for_dashboard  # Unified with dashboard
         self.telegram.get_balance = self._get_balance
         self.telegram.get_trades = self._get_trades
         self.telegram.get_market = self._get_market
@@ -419,6 +462,8 @@ class Julaba:
         self.telegram.run_backtest = self._run_backtest
         self.telegram.get_chart = self._get_chart
         self.telegram.get_equity_curve = lambda: self.equity_curve
+        # Symbol switch callback (unified with dashboard)
+        self.telegram.switch_symbol = self._switch_trading_symbol
         
         # Dashboard callbacks
         self.dashboard.get_status = self._get_status
@@ -427,7 +472,7 @@ class Julaba:
         self.dashboard.get_position = self._get_current_position_dict
         self.dashboard.get_trades = self._get_trades
         self.dashboard.get_regime = self._get_regime
-        self.dashboard.get_ai_stats = lambda: self.ai_filter.get_stats()
+        self.dashboard.get_ai_stats = self._get_ai_stats_for_dashboard
         self.dashboard.get_equity_curve = lambda: self.equity_curve
         # Enhanced dashboard callbacks
         self.dashboard.get_indicators = self._get_indicators_for_dashboard
@@ -440,6 +485,9 @@ class Julaba:
         # NEW: ML status and system logs
         self.dashboard.get_ml_status = self._get_ml_status
         self.dashboard.get_system_logs = self._get_system_logs
+        # NEW: AI tracker and pre-filter stats
+        self.dashboard.get_ai_tracker_stats = self._get_ai_tracker_stats
+        self.dashboard.get_prefilter_stats = self._get_prefilter_stats
         # AI explanation for dashboard info buttons
         self.dashboard.get_ai_explanation = self._get_ai_explanation_for_dashboard
         # Market scanner callbacks
@@ -536,8 +584,8 @@ Format with markdown for readability."""
     
     # Autonomous pair switch settings
     AUTO_SWITCH_ENABLED = True
-    AUTO_SWITCH_INTERVAL = 900  # Check every 15 minutes
-    AUTO_SWITCH_MIN_SCORE_DIFF = 15  # Minimum score difference to switch
+    AUTO_SWITCH_INTERVAL = 300  # Check every 5 minutes (was 900)
+    AUTO_SWITCH_MIN_SCORE_DIFF = 10  # Minimum score difference to switch (was 15)
     _last_auto_switch_check = 0
     _full_scan_cache = {"data": None, "timestamp": 0}
     FULL_SCAN_CACHE_DURATION = 120  # Cache for 2 minutes
@@ -670,7 +718,11 @@ Format with markdown for readability."""
             "current_symbol": self.SYMBOL,
             "best_pair": pairs_data[0] if pairs_data else None,
             "cached": False,
-            "timestamp": current_time
+            "timestamp": current_time,
+            # Multi-pair mode info
+            "multi_pair_enabled": len(self.additional_symbols) > 0,
+            "multi_pair_count": 1 + len(self.additional_symbols),
+            "active_pairs": [self.SYMBOL] + self.additional_symbols
         }
         
         # Cache the result
@@ -738,7 +790,11 @@ Format with markdown for readability."""
         return min(100, max(0, score))
 
     async def _autonomous_pair_check(self):
-        """Check if we should auto-switch to a better pair (autonomous mode)."""
+        """Check if we should auto-switch to a better pair (autonomous mode).
+        
+        AI validates the switch decision before executing to prevent
+        unnecessary switching or switching to unsuitable pairs.
+        """
         import time
         current_time = time.time()
         
@@ -765,9 +821,11 @@ Format with markdown for readability."""
             
             # Find current pair's score
             current_score = 0
+            current_pair_data = None
             for p in pairs:
                 if p["symbol"] == self.SYMBOL:
                     current_score = p.get("score", 0)
+                    current_pair_data = p
                     break
             
             best_pair = pairs[0]
@@ -777,17 +835,35 @@ Format with markdown for readability."""
             score_diff = best_score - current_score
             
             if best_pair["symbol"] != self.SYMBOL and score_diff >= type(self).AUTO_SWITCH_MIN_SCORE_DIFF:
-                # Auto-switch!
+                # === AI VALIDATION BEFORE SWITCH ===
+                ai_decision = await self._ai_validate_pair_switch(
+                    current_symbol=self.SYMBOL,
+                    current_data=current_pair_data,
+                    target_symbol=best_pair["symbol"],
+                    target_data=best_pair,
+                    score_diff=score_diff
+                )
+                
+                if not ai_decision.get("approved", False):
+                    logger.info(f"🤖 AI rejected auto-switch {self.SYMBOL} → {best_pair['symbol']}: {ai_decision.get('reason', 'No reason given')}")
+                    return
+                
+                ai_reason = ai_decision.get("reason", "Score improvement justified the switch")
+                
+                # Auto-switch - set flag to prevent duplicate notification
+                self._auto_switch_in_progress = True
                 old_symbol = self.SYMBOL
                 switch_result = self._switch_trading_symbol(best_pair["symbol"])
+                self._auto_switch_in_progress = False
                 
                 if switch_result.get("success"):
                     msg = (
-                        f"🤖 **Autonomous Pair Switch**\n\n"
+                        f"🤖 **AI-Approved Pair Switch**\n\n"
                         f"Switched: {old_symbol} → {best_pair['symbol']}\n\n"
-                        f"**Reason:**\n"
-                        f"• Old score: {current_score:.1f}\n"
-                        f"• New score: {best_score:.1f} (+{score_diff:.1f})\n\n"
+                        f"**AI Reasoning:**\n{ai_reason}\n\n"
+                        f"**Scores:**\n"
+                        f"• {old_symbol}: {current_score:.1f}\n"
+                        f"• {best_pair['symbol']}: {best_score:.1f} (+{score_diff:.1f})\n\n"
                         f"**{best_pair['symbol']} Stats:**\n"
                         f"• RSI: {best_pair.get('rsi', '--')}\n"
                         f"• ADX: {best_pair.get('adx', '--')}\n"
@@ -796,12 +872,15 @@ Format with markdown for readability."""
                         f"• Volume: {best_pair.get('volume_ratio', 1):.1f}x avg"
                     )
                     
-                    logger.info(f"🤖 Auto-switched from {old_symbol} to {best_pair['symbol']} (score +{score_diff:.1f})")
+                    logger.info(f"🤖 AI approved switch {old_symbol} → {best_pair['symbol']}: {ai_reason[:50]}...")
                     
                     # Send Telegram notification
                     if self.telegram.enabled:
                         await self.telegram.send_message(msg)
                     
+                    # Update AI history
+                    self.ai_filter.record_system_message(f"AI approved switch from {old_symbol} to {best_pair['symbol']}: {ai_reason}")
+
                     # Clear and refetch data for new pair
                     self.bars_1m = []
                     self.bars_agg = []
@@ -809,6 +888,151 @@ Format with markdown for readability."""
                     
         except Exception as e:
             logger.error(f"Autonomous pair check error: {e}")
+
+    async def _ai_validate_pair_switch(self, current_symbol: str, current_data: Optional[Dict],
+                                        target_symbol: str, target_data: Dict, 
+                                        score_diff: float) -> Dict[str, Any]:
+        """Ask AI to validate whether a pair switch makes sense.
+        
+        Integrates:
+        - Scanner data (price, volume, trend)
+        - Mathematical analysis (RSI, ADX, moving averages)
+        - Multi-timeframe context
+        - Market regime detection
+        
+        Returns:
+            Dict with 'approved' (bool) and 'reason' (str)
+        """
+        try:
+            # === GATHER MATHEMATICAL ANALYSIS ===
+            # Get current regime for context
+            regime_info = self._get_regime() or {}
+            current_regime = regime_info.get('regime', 'unknown')
+            market_hurst = regime_info.get('hurst', 0.5)
+            
+            # Get MTF analysis if available
+            mtf_context = ""
+            if self.mtf_analyzer and self.mtf_analyzer.cached_1h is not None:
+                try:
+                    mtf = self.mtf_analyzer.analyze(pd.DataFrame(self.bars_agg), 1)  # Signal=1 for context
+                    mtf_context = f"""
+**Multi-Timeframe Analysis:**
+- 15m Trend: {mtf.get('trends', {}).get('15m', {}).get('direction', 'n/a')}
+- 1H Trend: {mtf.get('trends', {}).get('1h', {}).get('direction', 'n/a')}
+- Alignment Score: {mtf.get('alignment_score', 0):.0f}%
+- Recommendation: {mtf.get('recommendation', 'n/a')}"""
+                except Exception:
+                    pass
+            
+            # Build context for AI decision
+            current_info = ""
+            if current_data:
+                current_info = f"""
+**Current Pair: {current_symbol}**
+- Score: {current_data.get('score', 0):.1f}
+- RSI: {current_data.get('rsi', 50):.1f}
+- ADX: {current_data.get('adx', 0):.1f}
+- Trend: {current_data.get('trend', 'unknown')}
+- Signal: {current_data.get('signal_text', 'none')}
+- Volume Ratio: {current_data.get('volume_ratio', 1):.1f}x
+- 24h Change: {current_data.get('change', 0):.2f}%"""
+            else:
+                current_info = f"**Current Pair: {current_symbol}** (no data available)"
+            
+            target_info = f"""
+**Proposed Pair: {target_symbol}**
+- Score: {target_data.get('score', 0):.1f}
+- RSI: {target_data.get('rsi', 50):.1f}
+- ADX: {target_data.get('adx', 0):.1f}
+- Trend: {target_data.get('trend', 'unknown')}
+- Signal: {target_data.get('signal_text', 'none')}
+- Volume Ratio: {target_data.get('volume_ratio', 1):.1f}x
+- 24h Change: {target_data.get('change', 0):.2f}%
+- Volatility: {target_data.get('volatility', 0):.2f}%"""
+            
+            # Mathematical pre-checks (hard rules)
+            math_warnings = []
+            target_rsi = target_data.get('rsi', 50)
+            target_adx = target_data.get('adx', 0)
+            target_volume = target_data.get('volume_ratio', 1)
+            
+            if target_rsi > 78 or target_rsi < 22:
+                math_warnings.append(f"RSI extreme ({target_rsi:.0f}) - high reversal risk")
+            if target_adx < 15:
+                math_warnings.append(f"ADX too weak ({target_adx:.0f}) - no clear trend")
+            if target_volume < 0.7:
+                math_warnings.append(f"Low volume ({target_volume:.1f}x) - poor liquidity")
+            if market_hurst < 0.4 and current_regime == 'ranging':
+                math_warnings.append("Market is ranging (Hurst < 0.4) - switches risky")
+            
+            math_section = ""
+            if math_warnings:
+                math_section = f"\n**⚠️ Mathematical Warnings:**\n" + "\n".join(f"- {w}" for w in math_warnings)
+            
+            prompt = f"""You are an AI trading assistant with access to mathematical market analysis. Evaluate this proposed pair switch.
+
+{current_info}
+
+{target_info}
+
+**Market Context:**
+- Current Regime: {current_regime}
+- Hurst Exponent: {market_hurst:.3f} (>0.5 = trending, <0.5 = mean-reverting)
+- Score Difference: +{score_diff:.1f} points in favor of {target_symbol}
+{mtf_context}
+{math_section}
+
+**INTEGRATED DECISION CRITERIA:**
+
+✅ **APPROVE if:**
+- Score diff > 20 AND target has clear signal (LONG/SHORT)
+- Target ADX > 20 (strong trend) AND RSI 30-70 (safe zone)
+- Volume ratio > 1.0x (good liquidity)
+- No mathematical warnings OR warnings are minor
+- Higher timeframes aligned with target's trend direction
+
+❌ **REJECT if:**
+- Mathematical warnings indicate high risk
+- Target pair has extreme RSI (>75 or <25)
+- Target pair is choppy (ADX < 15)
+- Current pair already has strong setup (ADX > 30, clear signal)
+- Market regime is ranging AND score difference < 25
+- Higher timeframes show conflicting trends
+
+Respond with EXACTLY this format:
+DECISION: APPROVE or REJECT
+REASON: One sentence explanation referencing specific numbers (max 60 words)"""
+
+            # Use AI to evaluate
+            response = self.ai_filter._generate_content(prompt)
+            
+            if not response:
+                # Default to approve if AI unavailable (score-based fallback)
+                return {"approved": True, "reason": "AI unavailable - approved based on score difference"}
+            
+            # Parse response
+            response_upper = response.upper()
+            approved = "APPROVE" in response_upper and "REJECT" not in response_upper.split("APPROVE")[0]
+            
+            # Extract reason
+            reason = "Score-based switch"
+            if "REASON:" in response.upper():
+                reason_start = response.upper().find("REASON:") + 7
+                reason = response[reason_start:].strip()
+                # Limit length
+                if len(reason) > 200:
+                    reason = reason[:200] + "..."
+            elif approved:
+                reason = "AI approved based on indicator analysis"
+            else:
+                reason = "AI found conditions unsuitable for switching"
+            
+            return {"approved": approved, "reason": reason}
+            
+        except Exception as e:
+            logger.error(f"AI pair switch validation error: {e}")
+            # On error, default to approve (score-based)
+            return {"approved": True, "reason": f"AI validation error - approved on score (+{score_diff:.1f})"}
 
     def _get_market_scan_data(self) -> Dict[str, Any]:
         """Get multi-pair market data for the scanner (delegates to full scan)."""
@@ -874,23 +1098,36 @@ Format with markdown for readability."""
         }
     
     def _switch_trading_symbol(self, symbol: str) -> Dict[str, Any]:
-        """Switch to a different trading symbol."""
+        """Switch to a different trading symbol.
+        
+        UNIFIED SYMBOL SWITCH - Called by both Dashboard and Telegram.
+        Ensures all components are updated consistently:
+        - Bot state (self.SYMBOL)
+        - AI Filter default symbol
+        - Data caches (candles, price, ATR)
+        - Market scan cache
+        - Persisted config file
+        - Triggers data refetch
+        """
         try:
-            # Validate symbol format
+            # Normalize symbol format to BASEUSDT (e.g., "SOLUSDT", "BTCUSDT")
+            symbol = symbol.upper().strip()
+            if "/" in symbol:
+                symbol = symbol.replace("/", "")  # "SOL/USDT" -> "SOLUSDT"
             if not symbol.endswith("USDT"):
-                symbol = symbol.upper() + "USDT"
-            else:
-                symbol = symbol.upper()
+                symbol = symbol + "USDT"
             
             base = symbol.replace("USDT", "")
             valid_bases = ["BTC", "ETH", "SOL", "LINK", "AVAX", "MATIC", "DOT", "ADA", 
                           "XRP", "DOGE", "ARB", "OP", "APT", "SUI", "NEAR", "INJ", 
-                          "TIA", "SEI", "WLD", "PYTH", "JTO", "JUP"]
+                          "TIA", "SEI", "WLD", "PYTH", "JTO", "JUP", "SHIB", "PEPE", 
+                          "WIF", "BONK", "FTM", "ATOM", "UNI", "AAVE", "LTC", "BCH",
+                          "ETC", "FIL", "RENDER", "TAO"]
             
             if base not in valid_bases:
                 return {
                     "success": False,
-                    "error": f"Invalid symbol. Valid: {', '.join(valid_bases)}"
+                    "error": f"Invalid symbol. Valid: {', '.join(valid_bases[:15])}..."
                 }
             
             # Check if we have a position
@@ -900,22 +1137,62 @@ Format with markdown for readability."""
                     "error": "Cannot switch while in a position. Close position first."
                 }
             
+            # Same symbol - no change needed
+            if symbol == self.SYMBOL:
+                return {
+                    "success": True,
+                    "message": f"Already trading {symbol}"
+                }
+            
             old_symbol = self.SYMBOL
+            
+            # === UPDATE ALL COMPONENTS ===
+            
+            # 1. Update bot state
             self.SYMBOL = symbol
             
-            # Clear cached data
-            self.latest_candles = {}
+            # 2. Update AI Filter
+            if hasattr(self.ai_filter, 'default_symbol'):
+                self.ai_filter.default_symbol = symbol
+            
+            # 3. Clear all data caches
+            self.bars_1m = []
+            self.bars_agg = pd.DataFrame()
+            self.cached_last_price = 0.0
+            self.cached_last_ticker = {}
+            self.cached_last_atr = 0.0
+            if hasattr(self, 'latest_candles'):
+                self.latest_candles = {}
             if hasattr(self, 'price_cache') and self.price_cache:
                 self.price_cache.clear()
             
-            # Save to config for persistence across restarts
+            # 4. Invalidate AI market cache
+            type(self)._ai_market_cache = {
+                "recommendation": None,
+                "best_pair": None,
+                "timestamp": None,
+                "top_pair_at_analysis": None
+            }
+            
+            # 5. Invalidate full scan cache
+            type(self)._full_scan_cache = {"data": None, "timestamp": 0}
+            
+            # 6. Signal main loop to refetch data
+            self._pending_data_refetch = True
+            
+            # 7. Save to config for persistence across restarts
             self._save_persisted_symbol()
             
-            logger.info(f"🔄 Switched from {old_symbol} to {symbol}")
+            logger.info(f"🔄 SYMBOL SWITCH: {old_symbol} → {symbol} (all components updated)")
+            
+            # 8. Queue Telegram notification for manual/API switches
+            # Note: Auto-switch sends its own detailed notification, so we skip if caller is auto-switch
+            if not getattr(self, '_auto_switch_in_progress', False):
+                self._pending_switch_notification = f"📍 Symbol switched: {old_symbol} → {symbol}"
             
             return {
                 "success": True,
-                "message": f"Switched from {old_symbol} to {symbol}"
+                "message": f"Switched from {old_symbol} to {symbol}. Fetching new data..."
             }
             
         except Exception as e:
@@ -1098,6 +1375,10 @@ Keep response under 150 words. Be direct and actionable."""
             "auto_switch": type(self).AUTO_SWITCH_ENABLED,
             "auto_switch_interval": type(self).AUTO_SWITCH_INTERVAL,
             "auto_switch_min_diff": type(self).AUTO_SWITCH_MIN_SCORE_DIFF,
+            # Multi-pair mode
+            "multi_pair_enabled": len(self.additional_symbols) > 0,
+            "multi_pair_count": 1 + len(self.additional_symbols),
+            "active_pairs": [self.SYMBOL] + self.additional_symbols,
         }
     
     def _set_system_param(self, param: str, value: Any) -> Dict[str, Any]:
@@ -1178,37 +1459,8 @@ Keep response under 150 words. Be direct and actionable."""
                 return {"success": True, "message": "Daily loss circuit breaker reset"}
             
             elif param == "symbol":
-                # Validate symbol format (should be like "BTC/USDT", "ETH/USDT", etc.)
-                new_symbol = str(value).upper().strip()
-                if "/" not in new_symbol:
-                    # Try to add /USDT if not present
-                    new_symbol = f"{new_symbol}/USDT"
-                
-                # Common valid symbols
-                valid_bases = ["BTC", "ETH", "SOL", "LINK", "AVAX", "MATIC", "DOT", "ADA", "XRP", "DOGE", "SHIB", "ARB", "OP", "APT", "SUI", "PEPE", "WIF", "BONK", "INJ", "TIA", "SEI", "NEAR", "FTM", "ATOM", "UNI", "AAVE", "LTC", "BCH", "ETC", "FIL", "RENDER", "TAO", "WLD", "PYTH", "JTO", "JUP"]
-                base = new_symbol.split("/")[0]
-                
-                if base not in valid_bases:
-                    return {"success": False, "message": f"Unknown symbol {new_symbol}. Supported: BTC, ETH, SOL, LINK, AVAX, MATIC, DOT, ADA, XRP, ARB, OP, APT, SUI, NEAR, UNI, AAVE, and more"}
-                
-                if self.position is not None:
-                    return {"success": False, "message": f"Cannot change symbol while in a position. Close position first."}
-                
-                old_symbol = self.SYMBOL
-                self.SYMBOL = new_symbol
-                self.ai_filter.default_symbol = new_symbol
-                
-                # Reset cached data for new symbol
-                self.bars_1m = []
-                self.bars_agg = pd.DataFrame()
-                self.cached_last_price = 0
-                self.cached_last_atr = 0
-                
-                # Save to config for persistence across restarts
-                self._save_persisted_symbol()
-                
-                logger.info(f"🔄 Symbol changed from {old_symbol} to {new_symbol}")
-                return {"success": True, "message": f"Symbol changed to {new_symbol}. Fetching new data..."}
+                # Use unified symbol switch method
+                return self._switch_trading_symbol(str(value))
             
             elif param == "auto_switch":
                 type(self).AUTO_SWITCH_ENABLED = str(value).lower() in ["true", "1", "yes", "on"]
@@ -1228,6 +1480,56 @@ Keep response under 150 words. Be direct and actionable."""
                     type(self).AUTO_SWITCH_MIN_SCORE_DIFF = val
                     return {"success": True, "message": f"Auto-switch minimum score difference set to {val} points"}
                 return {"success": False, "message": "Min difference must be 5-50 points"}
+            
+            elif param == "multi_pair_enabled":
+                enabled = str(value).lower() in ["true", "1", "yes", "on"]
+                if not enabled:
+                    # Disable multi-pair mode by clearing additional symbols
+                    self.additional_symbols = []
+                    return {"success": True, "message": "🔄 Multi-pair mode disabled. Now trading only primary pair."}
+                else:
+                    return {"success": True, "message": "ℹ️ Multi-pair is enabled when you have additional pairs. Use 'add_pair' to add pairs."}
+            
+            elif param == "add_pair":
+                # Add a pair to multi-pair list
+                new_pair = str(value).upper().replace("/", "")
+                if not new_pair.endswith("USDT"):
+                    new_pair = new_pair + "USDT"
+                
+                valid_bases = ["BTC", "ETH", "SOL", "LINK", "AVAX", "MATIC", "DOT", "ADA", "XRP", "DOGE", "ARB", "OP", "APT", "SUI", "NEAR", "INJ", "TIA", "SEI", "WLD"]
+                base = new_pair.replace("USDT", "")
+                
+                if base not in valid_bases:
+                    return {"success": False, "message": f"Unknown pair {new_pair}. Supported: {', '.join(valid_bases)}"}
+                
+                if new_pair == self.SYMBOL:
+                    return {"success": False, "message": f"{new_pair} is already the primary pair."}
+                
+                if new_pair in self.additional_symbols:
+                    return {"success": False, "message": f"{new_pair} is already in the multi-pair list."}
+                
+                self.additional_symbols.append(new_pair)
+                all_pairs = [self.SYMBOL] + self.additional_symbols
+                return {"success": True, "message": f"✅ Added {new_pair} to multi-pair mode. Active pairs: {', '.join(all_pairs)}"}
+            
+            elif param == "remove_pair":
+                # Remove a pair from multi-pair list
+                rm_pair = str(value).upper().replace("/", "")
+                if not rm_pair.endswith("USDT"):
+                    rm_pair = rm_pair + "USDT"
+                
+                if rm_pair == self.SYMBOL:
+                    return {"success": False, "message": f"Cannot remove the primary pair. Use 'symbol' to change the primary pair instead."}
+                
+                if rm_pair not in self.additional_symbols:
+                    return {"success": False, "message": f"{rm_pair} is not in the multi-pair list."}
+                
+                self.additional_symbols.remove(rm_pair)
+                all_pairs = [self.SYMBOL] + self.additional_symbols
+                if self.additional_symbols:
+                    return {"success": True, "message": f"❌ Removed {rm_pair}. Active pairs: {', '.join(all_pairs)}"}
+                else:
+                    return {"success": True, "message": f"❌ Removed {rm_pair}. Multi-pair mode disabled (only primary pair active)."}
             
             else:
                 return {"success": False, "message": f"Unknown parameter: {param}"}
@@ -1253,6 +1555,9 @@ Keep response under 150 words. Be direct and actionable."""
                 market_scan = {
                     "current_symbol": scan_data.get('current_symbol', ''),
                     "auto_switch_enabled": type(self).AUTO_SWITCH_ENABLED,
+                    "multi_pair_enabled": len(self.additional_symbols) > 0,
+                    "multi_pair_count": 1 + len(self.additional_symbols),
+                    "active_pairs": [self.SYMBOL] + self.additional_symbols,
                     "best_pair": scan_data.get('best_pair', {}).get('symbol') if scan_data.get('best_pair') else None,
                     "top_pairs": [
                         {
@@ -1280,6 +1585,9 @@ Keep response under 150 words. Be direct and actionable."""
             "market": self._get_market(),
             "market_scan": market_scan,
             "ml": ml_stats,  # Use normalized stats directly
+            "ai": self._get_ai_stats_for_dashboard(),  # Unified AI stats with mode
+            "ai_tracker": self._get_ai_tracker_stats(),  # NEW: AI decision tracking
+            "prefilter": self._get_prefilter_stats(),  # Pre-filter statistics
             "regime": regime_info.get("regime", "unknown") if regime_info else "unknown",
             "regime_details": regime_info if regime_info else {},
             "signals": self._get_signals()[-3:] if self._get_signals() else [],
@@ -1459,6 +1767,56 @@ Keep response under 150 words. Be direct and actionable."""
             "model_path": str(self.ml_predictor.model_path),
             "features": len(self.ml_predictor.feature_columns),
             "last_prediction": last_pred
+        }
+
+    def _get_ai_stats_for_dashboard(self) -> Dict[str, Any]:
+        """Get AI stats for dashboard with correct mode from bot."""
+        stats = self.ai_filter.get_stats()
+        # Add the actual bot ai_mode (not from ai_filter)
+        stats['mode'] = self.ai_mode
+        stats['threshold'] = self.ai_filter.confidence_threshold
+        stats['last_decision'] = getattr(self.ai_filter, 'last_decision', None)
+        return stats
+
+    def _get_ai_tracker_stats(self) -> Dict[str, Any]:
+        """Get AI decision tracking statistics."""
+        summary = self.ai_tracker.get_accuracy_summary()
+        recent = self.ai_tracker.get_recent_decisions(count=5)
+        
+        return {
+            "summary": summary,
+            "recent_decisions": recent,
+            "total_tracked": summary.get('total_decisions', 0),
+            "approval_rate": f"{summary.get('approval_rate', 0) * 100:.1f}%",
+            "approval_accuracy": f"{summary.get('approval_accuracy', 0) * 100:.1f}%" if summary.get('approved_with_outcome', 0) > 0 else "N/A",
+            "net_ai_value": f"${summary.get('net_ai_value', 0):+.2f}"
+        }
+
+    def _get_prefilter_stats(self) -> Dict[str, Any]:
+        """Get pre-filter statistics for dashboard."""
+        stats = self.prefilter_stats.copy()
+        total = stats.get('total_signals', 0)
+        passed = stats.get('passed', 0)
+        
+        # Calculate pass rate
+        pass_rate = (passed / total * 100) if total > 0 else 0
+        
+        # Calculate block reasons breakdown
+        blocked_total = total - passed
+        
+        return {
+            "total_signals": total,
+            "passed": passed,
+            "blocked": blocked_total,
+            "pass_rate": f"{pass_rate:.1f}%",
+            "blocked_by_score": stats.get('blocked_score', 0),
+            "blocked_by_adx_low": stats.get('blocked_adx_low', 0),
+            "blocked_by_adx_danger": stats.get('blocked_adx_danger', 0),
+            "blocked_by_volume": stats.get('blocked_volume', 0),
+            "blocked_by_confluence": stats.get('blocked_confluence', 0),
+            "by_regime": stats.get('by_regime', {}),
+            "adx_danger_zone": self.ADX_DANGER_ZONE,
+            "min_volume_ratio": self.MIN_VOLUME_RATIO
         }
 
     def _get_system_logs(self, count: int = 50) -> List[Dict[str, Any]]:
@@ -1704,9 +2062,7 @@ Keep response under 150 words. Be direct and actionable."""
         # ML prediction if trained
         ml = get_ml_classifier()
         if ml.is_trained:
-            from indicator import compute_ml_features
-            features = compute_ml_features(self.bars_agg)
-            pred = ml.predict(features)
+            pred = ml.predict(self.bars_agg)  # Pass dataframe directly
             if pred:
                 result['ml_prediction'] = pred.get('regime')
                 result['ml_confidence'] = round(pred.get('confidence', 0) * 100, 1)
@@ -1960,7 +2316,8 @@ Keep response under 150 words. Be direct and actionable."""
         try:
             signals_df = generate_signals(self.bars_agg)
             last_signal = int(signals_df.iloc[-1].get("Side", 0))
-        except:
+        except (KeyError, IndexError, ValueError) as e:
+            logger.debug(f"Could not get MTF signal: {e}")
             last_signal = 0
         
         # Run MTF analysis
@@ -2269,6 +2626,21 @@ Keep response under 150 words. Be direct and actionable."""
         try:
             while self.running:
                 try:
+                    # Check for pending switch notification (from sync switch method)
+                    if hasattr(self, '_pending_switch_notification') and self._pending_switch_notification:
+                        msg = self._pending_switch_notification
+                        self._pending_switch_notification = None
+                        if self.telegram.enabled:
+                            await self.telegram.send_message(msg)
+                    
+                    # Check for pending data refetch (after symbol change)
+                    if self._pending_data_refetch:
+                        logger.info(f"🔄 Refetching data for new symbol: {self.SYMBOL}")
+                        await self.fetch_initial_data()
+                        last_bar_ts = self.bars_1m[-1]["timestamp"] if self.bars_1m else 0
+                        self._pending_data_refetch = False
+                        continue  # Skip this iteration to process new data
+                    
                     # Fetch latest candles
                     ohlcv = await self.exchange.fetch_ohlcv(
                         self.SYMBOL,
@@ -2647,6 +3019,9 @@ _Technical signal filtered by AI_"""
         try:
             ml_classifier = get_ml_classifier()
             ml_stats = ml_classifier.get_stats()
+        except (AttributeError, RuntimeError) as e:
+            logger.debug(f"Could not get ML stats: {e}")
+            ml_stats = {'total_samples': 0, 'is_trained': False}
             ml_status = f"Trained ({ml_stats.get('total_samples', 0)} samples)" if ml_stats.get('is_trained') else f"Learning ({ml_stats.get('samples_until_training', 50)} needed)"
         except:
             ml_status = "N/A"
@@ -3046,6 +3421,174 @@ _Auto-update every 4 hours_
             'breakdown': f"Tech:{tech_component:.0f} + ML:{ml_component:.0f} + Regime:{regime_component:.0f}"
         }
 
+    # === PRE-FILTER CONFIGURATION ===
+    # Optimized based on backtest data analysis (2026-01-10)
+    # Key findings:
+    # - WEAK_TRENDING: 80% win rate (BEST!)
+    # - ADX 25-35: 66-69% win rate (sweet spot)
+    # - ADX 35-40: 22% win rate (DANGER ZONE - AVOID)
+    # - Volume >= 1.5x: 100% win rate
+    # - Volume >= 1.0x: 61% win rate
+    
+    # Minimum score thresholds by regime (regime-aware filtering)
+    # REDUCED FOR FASTER SAMPLE COLLECTION
+    MIN_SCORE_THRESHOLDS = {
+        'TRENDING': 30,       # Lowered from 40
+        'STRONG_TREND': 25,   # Lowered from 35
+        'WEAK_TREND': 20,     # Lowered from 30
+        'WEAK_TRENDING': 20,  # Lowered from 30
+        'CHOPPY': 60,         # Lowered from 80 - but still high
+        'RANGING': 40,        # Lowered from 55
+        'VOLATILE': 35,       # Lowered from 45
+        'UNKNOWN': 35         # Lowered from 50
+    }
+    
+    # Minimum ADX for each regime (ensures trend strength)
+    # REDUCED FOR FASTER SAMPLE COLLECTION
+    MIN_ADX_THRESHOLDS = {
+        'TRENDING': 20,       # Lowered from 25
+        'STRONG_TREND': 20,   # Lowered from 25
+        'WEAK_TREND': 18,     # Lowered from 25
+        'WEAK_TRENDING': 18,  # Lowered from 25
+        'CHOPPY': 30,         # Lowered from 40
+        'RANGING': 15,        # Lowered from 20
+        'VOLATILE': 20,       # Lowered from 25
+        'UNKNOWN': 20         # Lowered from 25
+    }
+    
+    # ADX danger zone - avoid ADX 35-40 (only 22% win rate)
+    # DISABLED FOR SAMPLE COLLECTION - We'll let AI filter this
+    ADX_DANGER_ZONE = None  # Was (35, 40), now disabled
+    
+    # Volume requirement - LOWERED for more trades
+    MIN_VOLUME_RATIO = 0.7  # Lowered from 0.9
+
+    def _apply_pre_filters(
+        self,
+        signal: int,
+        price: float,
+        atr: float,
+        regime_info: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Apply fast pre-filters to reject low-quality signals early.
+        
+        This saves API calls to Gemini for obviously bad signals.
+        
+        Filters:
+        1. Regime-aware minimum score threshold
+        2. Minimum ADX requirement by regime
+        3. Volume confirmation (must have above-average volume)
+        4. Confluence check (multiple indicators agreeing)
+        """
+        result = {'passed': True, 'reason': None, 'filters_checked': []}
+        regime = regime_info.get('regime', 'UNKNOWN') if regime_info else 'UNKNOWN'
+        
+        # Track total signals
+        self.prefilter_stats['total_signals'] += 1
+        if regime not in self.prefilter_stats['by_regime']:
+            self.prefilter_stats['by_regime'][regime] = {'total': 0, 'passed': 0}
+        self.prefilter_stats['by_regime'][regime]['total'] += 1
+        
+        try:
+            df = self.bars_agg
+            if len(df) < 10:
+                self.prefilter_stats['passed'] += 1
+                self.prefilter_stats['by_regime'][regime]['passed'] += 1
+                return result  # Not enough data, let AI decide
+            
+            latest = df.iloc[-1]
+            
+            # === FILTER 1: Regime-specific minimum score ===
+            # Quick pre-calculation of technical score components
+            adx = latest.get('adx', 0) if 'adx' in df.columns else 0
+            rsi = latest.get('rsi', 50) if 'rsi' in df.columns else 50
+            volume_ratio = latest.get('volume_ratio', 1) if 'volume_ratio' in df.columns else 1
+            
+            quick_score = 0
+            # ADX contribution
+            quick_score += min(30, adx * 1.0) if adx >= 20 else adx * 0.5
+            # RSI contribution (not extreme = good)
+            if 35 <= rsi <= 65:
+                quick_score += 15
+            elif 25 <= rsi <= 75:
+                quick_score += 10
+            # Volume contribution
+            quick_score += min(15, volume_ratio * 7) if volume_ratio >= 1 else volume_ratio * 5
+            
+            min_threshold = self.MIN_SCORE_THRESHOLDS.get(regime, 50)
+            result['filters_checked'].append(f"score={quick_score:.0f}>={min_threshold}")
+            
+            if quick_score < min_threshold:
+                result['passed'] = False
+                result['reason'] = f"Score too low for {regime} regime ({quick_score:.0f} < {min_threshold})"
+                self.prefilter_stats['blocked_score'] += 1
+                return result
+            
+            # === FILTER 2: ADX threshold by regime ===
+            min_adx = self.MIN_ADX_THRESHOLDS.get(regime, 25)
+            result['filters_checked'].append(f"adx={adx:.0f}>={min_adx}")
+            
+            if adx < min_adx:
+                result['passed'] = False
+                result['reason'] = f"ADX too weak for {regime} regime ({adx:.0f} < {min_adx})"
+                self.prefilter_stats['blocked_adx_low'] += 1
+                return result
+            
+            # === FILTER 2b: ADX DANGER ZONE check - DISABLED FOR SAMPLE COLLECTION ===
+            # We let AI handle this instead of hard-blocking
+            if self.ADX_DANGER_ZONE and self.ADX_DANGER_ZONE[0] <= adx <= self.ADX_DANGER_ZONE[1]:
+                result['filters_checked'].append(f"adx_danger_zone={adx:.0f}")
+                result['passed'] = False
+                result['reason'] = f"ADX in DANGER ZONE ({adx:.0f} is in {self.ADX_DANGER_ZONE[0]}-{self.ADX_DANGER_ZONE[1]}, only 22% win rate)"
+                self.prefilter_stats['blocked_adx_danger'] += 1
+                return result
+            
+            # === FILTER 3: Volume confirmation ===
+            result['filters_checked'].append(f"vol={volume_ratio:.1f}>={self.MIN_VOLUME_RATIO}")
+            
+            if volume_ratio < self.MIN_VOLUME_RATIO:  # Below minimum threshold
+                result['passed'] = False
+                result['reason'] = f"Volume too low ({volume_ratio:.1f}x < {self.MIN_VOLUME_RATIO}x minimum)"
+                self.prefilter_stats['blocked_volume'] += 1
+                return result
+            
+            # === FILTER 4: Confluence check (at least 2/3 must agree) ===
+            confluence_count = 0
+            
+            # Check 1: RSI agreement with signal direction
+            if signal == 1 and rsi < 65:  # Long with RSI not overbought
+                confluence_count += 1
+            elif signal == -1 and rsi > 35:  # Short with RSI not oversold
+                confluence_count += 1
+            
+            # Check 2: ADX shows trend strength
+            if adx >= 25:
+                confluence_count += 1
+            
+            # Check 3: Volume confirms interest
+            if volume_ratio >= 1.0:
+                confluence_count += 1
+            
+            result['filters_checked'].append(f"confluence={confluence_count}/3")
+            
+            if confluence_count < 2:
+                result['passed'] = False
+                result['reason'] = f"Insufficient confluence ({confluence_count}/3 indicators agreeing)"
+                self.prefilter_stats['blocked_confluence'] += 1
+                return result
+            
+            # All filters passed
+            self.prefilter_stats['passed'] += 1
+            self.prefilter_stats['by_regime'][regime]['passed'] += 1
+            logger.debug(f"✅ Pre-filters PASSED: {', '.join(result['filters_checked'])}")
+            return result
+            
+        except Exception as e:
+            logger.debug(f"Pre-filter error: {e}")
+            # On error, let the signal through for AI to evaluate
+            return result
+
     def _log_decision_alignment(
         self,
         ml_result: Dict[str, Any],
@@ -3084,10 +3627,11 @@ _Auto-update every 4 hours_
         """
         Process a trading signal through the complete decision pipeline.
         
-        DECISION FLOW (Signal → ML → AI):
-        1. MATH SIGNAL: Technical indicators generate raw signal (+1/-1)
-        2. ML SCORING: XGBoost predicts win probability based on historical patterns
-        3. AI DECISION: Gemini AI makes FINAL decision with all context
+        DECISION FLOW (Signal → Pre-filters → ML → AI):
+        1. PRE-FILTERS: Minimum score and regime checks
+        2. MATH SIGNAL: Technical indicators generate raw signal (+1/-1)
+        3. ML SCORING: XGBoost predicts win probability based on historical patterns
+        4. AI DECISION: Gemini AI makes FINAL decision with all context
         
         The AI sees:
         - Technical signal strength and regime
@@ -3102,6 +3646,12 @@ _Auto-update every 4 hours_
         btc_status = await self._check_btc_crash_protection()
         if btc_status['cooldown_active']:
             logger.info(f"🚫 Signal {side} BLOCKED: {btc_status['reason']}")
+            return
+        
+        # === PHASE 0.5: PRE-FILTERS (Fast rejection for low-quality signals) ===
+        pre_filter_result = self._apply_pre_filters(signal, price, atr, regime_info)
+        if not pre_filter_result['passed']:
+            logger.info(f"🚫 Signal {side} PRE-FILTERED: {pre_filter_result['reason']}")
             return
         
         # === PHASE 1: CALCULATE TECHNICAL SCORE ===
@@ -3159,6 +3709,22 @@ _Auto-update every 4 hours_
         
         # Log decision alignment
         self._log_decision_alignment(ml_result, ai_result, system_score)
+        
+        # === RECORD AI DECISION FOR TRACKING ===
+        self.current_decision_id = self.ai_tracker.record_decision(
+            symbol=self.SYMBOL,
+            signal_direction=side,
+            price=price,
+            approved=ai_result["approved"],
+            confidence=ai_result["confidence"],
+            reasoning=ai_result.get("reasoning", ""),
+            threshold_used=ai_result.get("threshold_used", self.ai_filter.confidence_threshold),
+            regime=regime_info.get('regime', 'UNKNOWN') if regime_info else 'UNKNOWN',
+            tech_score=tech_score['score'],
+            system_score=system_score['combined'],
+            ml_probability=ml_result.get('ml_win_probability', 0.5),
+            ml_confidence=ml_result.get('ml_confidence', 'N/A')
+        )
         
         # Record signal in history (complete data for analysis)
         self.signal_history.append({
@@ -3462,6 +4028,22 @@ _Auto-update every 4 hours_
         
         # Record result for AI filter learning
         self.ai_filter.record_trade_result(is_win, pnl)
+        
+        # === RECORD OUTCOME FOR AI DECISION TRACKING ===
+        if self.current_decision_id:
+            # Calculate trade duration using opened_at
+            duration_minutes = 0
+            if pos.opened_at:
+                duration_minutes = int((datetime.utcnow() - pos.opened_at).total_seconds() / 60)
+            
+            self.ai_tracker.record_trade_outcome(
+                decision_id=self.current_decision_id,
+                outcome="WIN" if is_win else "LOSS",
+                pnl=pnl,
+                exit_reason=reason,
+                duration_minutes=duration_minutes
+            )
+            self.current_decision_id = None  # Clear for next trade
         
         logger.info(
             f"CLOSED {pos.side.upper()} | Reason: {reason} | Price: {price:.4f} | "
