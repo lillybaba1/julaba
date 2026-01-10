@@ -6,11 +6,43 @@ Provides real-time notifications and interactive commands.
 import os
 import asyncio
 import logging
+import re
 from datetime import datetime
 from typing import Optional, Dict, Any, Callable
 from functools import wraps
 
 logger = logging.getLogger(__name__)
+
+
+def sanitize_markdown(text: str) -> str:
+    """Sanitize text for Telegram Markdown to prevent parsing errors."""
+    if not text:
+        return text
+    
+    # Escape special Markdown characters that might break parsing
+    # But preserve intentional formatting like *bold* and _italic_
+    
+    # First, protect valid markdown patterns
+    # Then escape problematic characters
+    
+    # Fix unbalanced asterisks and underscores
+    # Count occurrences - if odd, escape the last one
+    asterisk_count = text.count('*')
+    if asterisk_count % 2 == 1:
+        # Find last asterisk and escape it
+        text = text[::-1].replace('*', '\\*', 1)[::-1]
+    
+    underscore_count = text.count('_')
+    if underscore_count % 2 == 1:
+        text = text[::-1].replace('_', '\\_', 1)[::-1]
+    
+    # Escape square brackets that aren't part of links
+    # Simple approach: escape standalone brackets
+    text = re.sub(r'\[(?![^\]]+\]\()', '\\[', text)
+    text = re.sub(r'(?<!\])\](?!\()', '\\]', text)
+    
+    return text
+
 
 # Telegram imports (optional - graceful fallback if not installed)
 try:
@@ -1214,6 +1246,15 @@ Example: `/aimode advisory`""",
                 # Regime
                 context_info += f"MARKET REGIME: {full_state.get('regime', 'unknown')}\n\n"
                 
+                # Market Scan - Top pairs by volatility
+                market_scan = full_state.get('market_scan', {})
+                if market_scan.get('top_pairs'):
+                    context_info += f"MARKET SCANNER (top by volatility):\n"
+                    context_info += f"  Currently trading: {market_scan.get('current_symbol', 'N/A')}\n"
+                    for p in market_scan.get('top_pairs', []):
+                        context_info += f"  • {p['symbol']}: ${p['price']:,.2f} ({p['change']:+.1f}%, {p['volatility']:.1f}% vol)\n"
+                    context_info += "\n"
+                
                 # Recent signals
                 signals = full_state.get('signals', [])
                 if signals:
@@ -1329,12 +1370,69 @@ Example: `/aimode advisory`""",
         if self.chat_with_ai:
             try:
                 response = await self.chat_with_ai(user_message, context_info)
+                
+                # === EXECUTE AI COMMAND BLOCKS ===
+                # Parse and execute any ```command blocks in AI response
+                import re
+                command_pattern = r'```command\s*\n?\s*(\{[^}]+\})\s*\n?```'
+                command_matches = re.findall(command_pattern, response, re.IGNORECASE | re.DOTALL)
+                
+                command_results = []
+                for cmd_json in command_matches:
+                    try:
+                        import json
+                        cmd = json.loads(cmd_json.strip())
+                        action = cmd.get('action', '')
+                        
+                        logger.info(f"🤖 AI COMMAND: {cmd}")
+                        
+                        if action == 'set_param' and self.set_system_param:
+                            param = cmd.get('param', '')
+                            value = cmd.get('value')
+                            result = self.set_system_param(param, value)
+                            if result.get('success'):
+                                command_results.append(f"✅ {result.get('message')}")
+                                logger.info(f"✅ AI set {param} = {value}")
+                            else:
+                                command_results.append(f"❌ {result.get('message')}")
+                                logger.warning(f"❌ AI failed to set {param}: {result.get('message')}")
+                        
+                        elif action == 'open_trade' and self.execute_ai_trade:
+                            side = cmd.get('side', 'long')
+                            result = await self.execute_ai_trade(side)
+                            if result.get('success'):
+                                command_results.append(f"✅ {result.get('message')}")
+                            else:
+                                command_results.append(f"❌ {result.get('message')}")
+                        
+                        elif action == 'close_trade' and self.close_ai_trade:
+                            result = await self.close_ai_trade()
+                            if result.get('success'):
+                                command_results.append(f"✅ {result.get('message')}")
+                            else:
+                                command_results.append(f"❌ {result.get('message')}")
+                        
+                    except json.JSONDecodeError as je:
+                        logger.error(f"AI command JSON error: {je}")
+                    except Exception as e:
+                        logger.error(f"AI command execution error: {e}")
+                
+                # Remove command blocks from displayed response
+                clean_response = re.sub(command_pattern, '', response, flags=re.IGNORECASE | re.DOTALL).strip()
+                
+                # Append command results if any
+                if command_results:
+                    clean_response += "\n\n🔧 *Actions Executed:*\n" + "\n".join(command_results)
+                
+                # Sanitize markdown and send
+                clean_response = sanitize_markdown(clean_response)
+                
                 # Try sending with Markdown, fall back to plain text if parsing fails
                 try:
-                    await update.message.reply_text(response, parse_mode="Markdown")
+                    await update.message.reply_text(clean_response, parse_mode="Markdown")
                 except Exception as markdown_error:
                     logger.warning(f"Markdown parsing failed, sending as plain text: {markdown_error}")
-                    await update.message.reply_text(response)
+                    await update.message.reply_text(clean_response)
             except Exception as e:
                 logger.error(f"AI chat error: {e}")
                 await update.message.reply_text(

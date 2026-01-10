@@ -6,6 +6,7 @@ Combines the original trading strategy with AI signal filtering and Telegram not
 
 import asyncio
 import argparse
+import json
 import logging
 import os
 import sys
@@ -70,7 +71,10 @@ from indicator import (
     get_regime_analysis,
     ml_predict_regime,
     ml_record_trade,
-    get_ml_classifier
+    get_ml_classifier,
+    calculate_rsi,
+    calculate_atr,
+    calculate_adx
 )
 
 # Import new enhancement modules
@@ -185,21 +189,54 @@ class Julaba:
     BTC_CRASH_COOLDOWN = 3600    # 1 hour pause after BTC crash
     BTC_CHECK_INTERVAL = 60      # Check BTC every 60 seconds
     
+    # Config file path for persisting settings
+    CONFIG_FILE = Path(__file__).parent / "julaba_config.json"
+    
+    @classmethod
+    def _load_persisted_symbol(cls) -> Optional[str]:
+        """Load persisted symbol from config file."""
+        try:
+            if cls.CONFIG_FILE.exists():
+                with open(cls.CONFIG_FILE, 'r') as f:
+                    config = json.load(f)
+                    symbol = config.get('symbol')
+                    if symbol:
+                        logger.info(f"📍 Loaded persisted symbol: {symbol}")
+                        return symbol
+        except Exception as e:
+            logger.debug(f"Could not load persisted symbol: {e}")
+        return None
+    
+    def _save_persisted_symbol(self):
+        """Save current symbol to config file."""
+        try:
+            config = {}
+            if self.CONFIG_FILE.exists():
+                with open(self.CONFIG_FILE, 'r') as f:
+                    config = json.load(f)
+            config['symbol'] = self.SYMBOL
+            config['last_updated'] = datetime.now(timezone.utc).isoformat()
+            with open(self.CONFIG_FILE, 'w') as f:
+                json.dump(config, f, indent=2)
+            logger.info(f"💾 Saved symbol to config: {self.SYMBOL}")
+        except Exception as e:
+            logger.error(f"Could not save persisted symbol: {e}")
+    
     def __init__(
         self,
         paper_balance: Optional[float] = None,
         ai_confidence: float = 0.7,
         log_level: str = "INFO",
-        ai_mode: str = "filter",  # "filter", "advisory", "autonomous", "hybrid"
+        ai_mode: str = "autonomous",  # "filter", "advisory", "autonomous", "hybrid"
         symbol: str = "LINK/USDT",
-        scan_interval: int = 300,
+        scan_interval: int = 60,  # Scan every 60 seconds for more opportunities
         summary_interval: int = 14400  # 4 hours default
     ):
         # Set log level
         logging.getLogger().setLevel(getattr(logging, log_level.upper()))
         
-        # Symbol (now configurable!)
-        self.SYMBOL = symbol
+        # Symbol (now configurable!) - Load persisted symbol if available
+        self.SYMBOL = self._load_persisted_symbol() or symbol
         
         # AI Trading Mode
         # "filter" = AI only validates technical signals (default)
@@ -210,6 +247,16 @@ class Julaba:
         self.pending_ai_trade = None  # For advisory/hybrid mode confirmation
         self.last_ai_scan_time = None  # Rate limit AI scans
         self.ai_scan_interval = scan_interval  # Configurable scan interval
+        self.ai_scan_notify_opportunities_only = True  # Only notify when AI finds opportunity
+        self.ai_scan_quiet_interval = 1800  # Notify "no opportunity" every 30 min (if not opportunities_only)
+        
+        # === AI AUTONOMOUS DECISION TRACKING ===
+        self.ai_decision_interval = 300  # Notify every 5 minutes about AI decisions
+        self.last_ai_decision_notification = None
+        self.ai_decisions_log = []  # Track all AI decisions for transparency
+        self.ai_self_adjust_enabled = True  # Allow AI to adjust settings based on performance
+        self.last_ai_self_adjust = None  # Rate limit self-adjustments
+        self.ai_self_adjust_interval = 1800  # Check every 30 minutes
         
         # Trading state
         self.paper_mode = paper_balance is not None
@@ -392,6 +439,634 @@ class Julaba:
         # NEW: ML status and system logs
         self.dashboard.get_ml_status = self._get_ml_status
         self.dashboard.get_system_logs = self._get_system_logs
+        # AI explanation for dashboard info buttons
+        self.dashboard.get_ai_explanation = self._get_ai_explanation_for_dashboard
+        # Market scanner callbacks
+        self.dashboard.get_market_scan = self._get_market_scan_data
+        self.dashboard.switch_symbol = self._switch_trading_symbol
+        self.dashboard.ai_analyze_markets = self._ai_analyze_all_markets
+    
+    def _get_ai_explanation_for_dashboard(self, topic: str, display_name: str) -> str:
+        """Get AI explanation for a dashboard topic."""
+        # Build context with current system state
+        context_parts = []
+        
+        try:
+            # Get current values based on topic
+            if topic == "current_signal":
+                signal = self._get_current_signal()
+                context_parts.append(f"Current signal data: {signal}")
+            elif topic == "technical_indicators":
+                indicators = self._get_indicators_for_dashboard()
+                context_parts.append(f"Current indicators: {indicators}")
+            elif topic == "market_regime":
+                regime = self._get_regime()
+                context_parts.append(f"Current regime: {regime}")
+            elif topic == "risk_manager":
+                risk = self._get_risk_stats()
+                context_parts.append(f"Risk stats: {risk}")
+            elif topic == "multi_timeframe":
+                mtf = self._get_mtf_analysis()
+                context_parts.append(f"MTF analysis: {mtf}")
+            elif topic == "ai_filter":
+                ai_stats = self.ai_filter.get_stats()
+                context_parts.append(f"AI stats: {ai_stats}")
+                context_parts.append(f"AI mode: {self.ai_mode}")
+            elif topic == "current_position":
+                pos = self._get_current_position_dict()
+                context_parts.append(f"Position: {pos}")
+            elif topic == "ml_model":
+                ml = self._get_ml_status()
+                context_parts.append(f"ML status: {ml}")
+            elif topic == "trading_parameters":
+                params = self._get_system_params()
+                context_parts.append(f"Parameters: {params}")
+            elif topic == "live_price_chart":
+                context_parts.append(f"Symbol: {self.SYMBOL}")
+                context_parts.append(f"Current price: ${self.cached_last_price:.4f}" if self.cached_last_price else "Price: Loading...")
+                context_parts.append(f"ATR: {self.cached_last_atr:.4f}" if self.cached_last_atr else "ATR: Loading...")
+                regime = self._get_regime()
+                context_parts.append(f"Market regime: {regime.get('regime', 'unknown') if regime else 'unknown'}")
+            elif topic == "equity_curve":
+                context_parts.append(f"Starting balance: ${self.initial_balance:,.2f}")
+                context_parts.append(f"Current balance: ${self.balance:,.2f}")
+                pnl = self.balance - self.initial_balance
+                pnl_pct = (pnl / self.initial_balance) * 100
+                context_parts.append(f"Total P&L: ${pnl:+,.2f} ({pnl_pct:+.2f}%)")
+                context_parts.append(f"Equity curve points: {len(self.equity_curve)}")
+                context_parts.append(f"Peak balance: ${self.peak_balance:,.2f}")
+                drawdown = ((self.peak_balance - self.balance) / self.peak_balance) * 100 if self.peak_balance > 0 else 0
+                context_parts.append(f"Current drawdown: {drawdown:.2f}%")
+            
+            context = "\\n".join(context_parts)
+        except Exception as e:
+            context = f"Error getting context: {e}"
+        
+        # Create prompt for AI
+        prompt = f"""You are Julaba's AI assistant explaining a dashboard section to the user.
+
+The user clicked the info button on: **{display_name}**
+
+Current system data:
+{context}
+
+Please explain:
+1. What this section shows and why it's important
+2. What the current values mean
+3. Any actionable insights based on current data
+4. Tips for using this information in trading decisions
+
+Keep your response concise (under 200 words), friendly, and educational. Use bullet points where helpful.
+Format with markdown for readability."""
+
+        try:
+            explanation = self.ai_filter._generate_content(prompt)
+            return explanation if explanation else "AI explanation temporarily unavailable."
+        except Exception as e:
+            logger.error(f"AI explanation error: {e}")
+            return f"Could not generate explanation: {str(e)}"
+    
+    # === FULL MARKET SCAN WITH INDICATORS ===
+    SCAN_PAIRS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "LINKUSDT", "AVAXUSDT", 
+                  "ARBUSDT", "SUIUSDT", "APTUSDT", "OPUSDT", "NEARUSDT",
+                  "INJUSDT", "TIAUSDT", "SEIUSDT", "WLDUSDT"]
+    
+    # Autonomous pair switch settings
+    AUTO_SWITCH_ENABLED = True
+    AUTO_SWITCH_INTERVAL = 900  # Check every 15 minutes
+    AUTO_SWITCH_MIN_SCORE_DIFF = 15  # Minimum score difference to switch
+    _last_auto_switch_check = 0
+    _full_scan_cache = {"data": None, "timestamp": 0}
+    FULL_SCAN_CACHE_DURATION = 120  # Cache for 2 minutes
+
+    def _get_market_scan_data_full(self) -> Dict[str, Any]:
+        """Get multi-pair market data WITH full indicator calculations."""
+        import time
+        current_time = time.time()
+        
+        # Return cached data if still valid
+        if (type(self)._full_scan_cache["data"] and 
+            current_time - type(self)._full_scan_cache["timestamp"] < type(self).FULL_SCAN_CACHE_DURATION):
+            cached = type(self)._full_scan_cache["data"].copy()
+            cached["cached"] = True
+            cached["cache_age"] = int(current_time - type(self)._full_scan_cache["timestamp"])
+            return cached
+        
+        pairs_data = []
+        
+        try:
+            import ccxt as ccxt_sync
+            sync_exchange = ccxt_sync.mexc({
+                "enableRateLimit": True,
+                "options": {"defaultType": "spot"}
+            })
+            
+            for symbol in type(self).SCAN_PAIRS:
+                try:
+                    # Fetch OHLCV data (100 bars of 15m = 25 hours of data)
+                    ohlcv = sync_exchange.fetch_ohlcv(symbol, '15m', limit=100)
+                    
+                    if len(ohlcv) < 50:
+                        continue
+                    
+                    # Convert to DataFrame
+                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    
+                    # Calculate indicators
+                    rsi = calculate_rsi(df['close'], period=14)
+                    current_rsi = float(rsi.iloc[-1]) if len(rsi) > 0 else 50
+                    
+                    adx = calculate_adx(df, period=14)
+                    
+                    # MACD
+                    ema12 = df['close'].ewm(span=12).mean()
+                    ema26 = df['close'].ewm(span=26).mean()
+                    macd = ema12 - ema26
+                    macd_signal = macd.ewm(span=9).mean()
+                    macd_hist = float(macd.iloc[-1] - macd_signal.iloc[-1])
+                    macd_bullish = macd_hist > 0
+                    
+                    # Volatility (ATR-based)
+                    atr = calculate_atr(df, period=14)
+                    current_atr = float(atr.iloc[-1]) if len(atr) > 0 else 0
+                    current_price = float(df['close'].iloc[-1])
+                    atr_pct = (current_atr / current_price * 100) if current_price > 0 else 0
+                    
+                    # Price momentum (% change over last 6 bars = 1.5 hours)
+                    momentum = ((df['close'].iloc[-1] / df['close'].iloc[-6]) - 1) * 100 if len(df) >= 6 else 0
+                    
+                    # Volume trend
+                    vol_sma = df['volume'].rolling(20).mean()
+                    volume_ratio = float(df['volume'].iloc[-1] / vol_sma.iloc[-1]) if vol_sma.iloc[-1] > 0 else 1
+                    
+                    # SMA trend (15/40 as per our strategy)
+                    sma15 = df['close'].rolling(15).mean()
+                    sma40 = df['close'].rolling(40).mean()
+                    trend = "bullish" if sma15.iloc[-1] > sma40.iloc[-1] else "bearish"
+                    trend_strength = abs((sma15.iloc[-1] - sma40.iloc[-1]) / sma40.iloc[-1] * 100) if sma40.iloc[-1] > 0 else 0
+                    
+                    # Signal detection
+                    signal = 0
+                    signal_text = "none"
+                    # Check for recent crossover (last 3 bars)
+                    for i in range(-3, 0):
+                        if sma15.iloc[i] > sma40.iloc[i] and sma15.iloc[i-1] <= sma40.iloc[i-1]:
+                            signal = 1
+                            signal_text = "LONG"
+                            break
+                        elif sma15.iloc[i] < sma40.iloc[i] and sma15.iloc[i-1] >= sma40.iloc[i-1]:
+                            signal = -1
+                            signal_text = "SHORT"
+                            break
+                    
+                    # Calculate tradability score (0-100)
+                    score = self._calculate_pair_score(
+                        rsi=current_rsi, adx=adx, atr_pct=atr_pct,
+                        volume_ratio=volume_ratio, macd_bullish=macd_bullish,
+                        trend_strength=trend_strength, signal=signal
+                    )
+                    
+                    # 24h change from ticker
+                    ticker = sync_exchange.fetch_ticker(symbol)
+                    change_24h = ticker.get('percentage', 0) or 0
+                    volume_24h = ticker.get('quoteVolume', 0) or 0
+                    
+                    pairs_data.append({
+                        "symbol": symbol,
+                        "price": current_price,
+                        "change": change_24h,
+                        "volatility": atr_pct,
+                        "volume": volume_24h,
+                        "high": float(df['high'].max()),
+                        "low": float(df['low'].min()),
+                        # New indicator fields
+                        "rsi": round(current_rsi, 1),
+                        "adx": round(adx, 1),
+                        "macd_bullish": macd_bullish,
+                        "trend": trend,
+                        "trend_strength": round(trend_strength, 2),
+                        "volume_ratio": round(volume_ratio, 2),
+                        "momentum": round(momentum, 2),
+                        "signal": signal,
+                        "signal_text": signal_text,
+                        "score": round(score, 1)
+                    })
+                    
+                except Exception as e:
+                    logger.debug(f"Error scanning {symbol}: {e}")
+                    continue
+            
+            # Sort by score (highest first)
+            pairs_data.sort(key=lambda x: x.get('score', 0), reverse=True)
+            
+        except Exception as e:
+            logger.error(f"Full market scan error: {e}")
+        
+        result = {
+            "pairs": pairs_data,
+            "current_symbol": self.SYMBOL,
+            "best_pair": pairs_data[0] if pairs_data else None,
+            "cached": False,
+            "timestamp": current_time
+        }
+        
+        # Cache the result
+        type(self)._full_scan_cache = {"data": result, "timestamp": current_time}
+        
+        return result
+
+    def _calculate_pair_score(self, rsi: float, adx: float, atr_pct: float,
+                              volume_ratio: float, macd_bullish: bool,
+                              trend_strength: float, signal: int) -> float:
+        """
+        Calculate a tradability score (0-100) for a pair.
+        
+        Scoring breakdown:
+        - ADX (trend strength): 0-25 points
+        - Volatility (ATR%): 0-20 points
+        - Volume: 0-15 points
+        - RSI positioning: 0-15 points
+        - Signal presence: 0-15 points
+        - MACD alignment: 0-10 points
+        """
+        score = 0
+        
+        # ADX: Higher is better for trending (sweet spot 25-50)
+        if adx >= 25:
+            adx_score = min(25, (adx - 10) * 0.8)
+        else:
+            adx_score = adx * 0.5
+        score += adx_score
+        
+        # Volatility: Higher ATR% means more profit potential (sweet spot 2-8%)
+        if atr_pct >= 1.5:
+            vol_score = min(20, atr_pct * 3)
+        else:
+            vol_score = atr_pct * 5
+        score += vol_score
+        
+        # Volume: Above average is good
+        if volume_ratio >= 1.0:
+            vol_mult_score = min(15, volume_ratio * 7)
+        else:
+            vol_mult_score = volume_ratio * 10
+        score += vol_mult_score
+        
+        # RSI: Best when not at extremes (40-60 is ideal for entries)
+        if 35 <= rsi <= 65:
+            rsi_score = 15
+        elif 25 <= rsi <= 75:
+            rsi_score = 10
+        else:
+            # Extremes can be good for reversal plays
+            rsi_score = 8 if (rsi < 25 or rsi > 75) else 5
+        score += rsi_score
+        
+        # Signal presence: Recent signal is highly valuable
+        if signal != 0:
+            score += 15
+        
+        # MACD alignment with trend
+        if (macd_bullish and trend_strength > 0.5) or (not macd_bullish and trend_strength > 0.5):
+            score += 10
+        elif macd_bullish or not macd_bullish:
+            score += 5
+        
+        return min(100, max(0, score))
+
+    async def _autonomous_pair_check(self):
+        """Check if we should auto-switch to a better pair (autonomous mode)."""
+        import time
+        current_time = time.time()
+        
+        # Only check periodically
+        if current_time - type(self)._last_auto_switch_check < type(self).AUTO_SWITCH_INTERVAL:
+            return
+        
+        type(self)._last_auto_switch_check = current_time
+        
+        # Only in autonomous mode and when not in position
+        if self.ai_mode != "autonomous" or self.position is not None:
+            return
+        
+        if not type(self).AUTO_SWITCH_ENABLED:
+            return
+        
+        try:
+            # Get full market scan
+            scan_data = self._get_market_scan_data_full()
+            pairs = scan_data.get("pairs", [])
+            
+            if not pairs:
+                return
+            
+            # Find current pair's score
+            current_score = 0
+            for p in pairs:
+                if p["symbol"] == self.SYMBOL:
+                    current_score = p.get("score", 0)
+                    break
+            
+            best_pair = pairs[0]
+            best_score = best_pair.get("score", 0)
+            
+            # Check if best pair is significantly better
+            score_diff = best_score - current_score
+            
+            if best_pair["symbol"] != self.SYMBOL and score_diff >= type(self).AUTO_SWITCH_MIN_SCORE_DIFF:
+                # Auto-switch!
+                old_symbol = self.SYMBOL
+                switch_result = self._switch_trading_symbol(best_pair["symbol"])
+                
+                if switch_result.get("success"):
+                    msg = (
+                        f"🤖 **Autonomous Pair Switch**\n\n"
+                        f"Switched: {old_symbol} → {best_pair['symbol']}\n\n"
+                        f"**Reason:**\n"
+                        f"• Old score: {current_score:.1f}\n"
+                        f"• New score: {best_score:.1f} (+{score_diff:.1f})\n\n"
+                        f"**{best_pair['symbol']} Stats:**\n"
+                        f"• RSI: {best_pair.get('rsi', '--')}\n"
+                        f"• ADX: {best_pair.get('adx', '--')}\n"
+                        f"• Trend: {best_pair.get('trend', '--')}\n"
+                        f"• Signal: {best_pair.get('signal_text', 'none')}\n"
+                        f"• Volume: {best_pair.get('volume_ratio', 1):.1f}x avg"
+                    )
+                    
+                    logger.info(f"🤖 Auto-switched from {old_symbol} to {best_pair['symbol']} (score +{score_diff:.1f})")
+                    
+                    # Send Telegram notification
+                    if self.telegram.enabled:
+                        await self.telegram.send_message(msg)
+                    
+                    # Clear and refetch data for new pair
+                    self.bars_1m = []
+                    self.bars_agg = []
+                    await self.fetch_initial_data()
+                    
+        except Exception as e:
+            logger.error(f"Autonomous pair check error: {e}")
+
+    def _get_market_scan_data(self) -> Dict[str, Any]:
+        """Get multi-pair market data for the scanner (delegates to full scan)."""
+        # Use the full scan which has indicators
+        return self._get_market_scan_data_full()
+    
+    def _get_market_scan_data_simple(self) -> Dict[str, Any]:
+        """Get basic multi-pair market data (fast, no indicators)."""
+        scan_pairs = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "LINKUSDT", "AVAXUSDT", 
+                      "ARBUSDT", "SUIUSDT", "APTUSDT", "OPUSDT", "NEARUSDT",
+                      "INJUSDT", "TIAUSDT", "SEIUSDT", "WLDUSDT"]
+        
+        pairs_data = []
+        
+        try:
+            # Use synchronous ccxt for market scanning (the main exchange is async)
+            import ccxt as ccxt_sync
+            sync_exchange = ccxt_sync.mexc({
+                "enableRateLimit": True,
+                "options": {"defaultType": "spot"}
+            })
+            
+            for symbol in scan_pairs:
+                try:
+                    # Fetch ticker data using sync exchange
+                    ticker = sync_exchange.fetch_ticker(symbol)
+                    
+                    # Calculate volatility from high/low
+                    high = ticker.get('high', 0) or 0
+                    low = ticker.get('low', 0) or 0
+                    price = ticker.get('last', 0) or ticker.get('close', 0) or 0
+                    
+                    if price > 0 and high > 0 and low > 0:
+                        volatility = (high - low) / price * 100
+                    else:
+                        volatility = 0
+                    
+                    change = ticker.get('percentage', 0) or 0
+                    volume = ticker.get('quoteVolume', 0) or 0
+                    
+                    pairs_data.append({
+                        "symbol": symbol,
+                        "price": price,
+                        "change": change,
+                        "volatility": volatility,
+                        "volume": volume,
+                        "high": high,
+                        "low": low
+                    })
+                except Exception as e:
+                    logger.debug(f"Error fetching {symbol}: {e}")
+                    continue
+            
+            # Sort by volatility (highest first)
+            pairs_data.sort(key=lambda x: x.get('volatility', 0), reverse=True)
+            
+        except Exception as e:
+            logger.error(f"Market scan error: {e}")
+        
+        return {
+            "pairs": pairs_data,
+            "current_symbol": self.SYMBOL
+        }
+    
+    def _switch_trading_symbol(self, symbol: str) -> Dict[str, Any]:
+        """Switch to a different trading symbol."""
+        try:
+            # Validate symbol format
+            if not symbol.endswith("USDT"):
+                symbol = symbol.upper() + "USDT"
+            else:
+                symbol = symbol.upper()
+            
+            base = symbol.replace("USDT", "")
+            valid_bases = ["BTC", "ETH", "SOL", "LINK", "AVAX", "MATIC", "DOT", "ADA", 
+                          "XRP", "DOGE", "ARB", "OP", "APT", "SUI", "NEAR", "INJ", 
+                          "TIA", "SEI", "WLD", "PYTH", "JTO", "JUP"]
+            
+            if base not in valid_bases:
+                return {
+                    "success": False,
+                    "error": f"Invalid symbol. Valid: {', '.join(valid_bases)}"
+                }
+            
+            # Check if we have a position
+            if self.position:
+                return {
+                    "success": False,
+                    "error": "Cannot switch while in a position. Close position first."
+                }
+            
+            old_symbol = self.SYMBOL
+            self.SYMBOL = symbol
+            
+            # Clear cached data
+            self.latest_candles = {}
+            if hasattr(self, 'price_cache') and self.price_cache:
+                self.price_cache.clear()
+            
+            # Save to config for persistence across restarts
+            self._save_persisted_symbol()
+            
+            logger.info(f"🔄 Switched from {old_symbol} to {symbol}")
+            
+            return {
+                "success": True,
+                "message": f"Switched from {old_symbol} to {symbol}"
+            }
+            
+        except Exception as e:
+            logger.error(f"Symbol switch error: {e}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    # Cache for AI market analysis to prevent flip-flopping recommendations
+    _ai_market_cache = {
+        "recommendation": None,
+        "best_pair": None,
+        "timestamp": None,
+        "top_pair_at_analysis": None
+    }
+    AI_MARKET_CACHE_DURATION = 300  # 5 minutes
+    
+    def _ai_analyze_all_markets(self) -> Dict[str, Any]:
+        """Use AI to analyze all market pairs and recommend the best one.
+        
+        Caches the recommendation for 5 minutes to prevent flip-flopping.
+        Only refreshes early if the top volatile pair changes significantly.
+        """
+        try:
+            # Get market scan data
+            scan_data = self._get_market_scan_data()
+            pairs = scan_data.get('pairs', [])
+            
+            if not pairs:
+                return {"recommendation": "No market data available.", "best_pair": ""}
+            
+            # Check if we have a valid cached recommendation
+            now = datetime.now(timezone.utc)
+            cache = self._ai_market_cache
+            
+            if cache["recommendation"] and cache["timestamp"]:
+                cache_age = (now - cache["timestamp"]).total_seconds()
+                
+                # Check if cache is still valid (under 5 minutes)
+                if cache_age < self.AI_MARKET_CACHE_DURATION:
+                    # Check if market conditions changed significantly
+                    current_top = pairs[0]["symbol"] if pairs else None
+                    cached_top = cache.get("top_pair_at_analysis")
+                    
+                    # Only invalidate if top pair changed
+                    if current_top == cached_top:
+                        remaining = int(self.AI_MARKET_CACHE_DURATION - cache_age)
+                        logger.debug(f"Using cached AI recommendation (expires in {remaining}s)")
+                        return {
+                            "recommendation": cache["recommendation"],
+                            "best_pair": cache["best_pair"],
+                            "cached": True,
+                            "cache_expires_in": remaining
+                        }
+                    else:
+                        logger.info(f"Market leader changed: {cached_top} → {current_top}, refreshing AI analysis")
+            
+            # Build analysis prompt
+            pairs = scan_data.get('pairs', [])
+            
+            if not pairs:
+                return {"recommendation": "No market data available.", "best_pair": ""}
+            
+            # Build analysis prompt with rich indicator data
+            pairs_summary = []
+            for p in pairs[:10]:  # Top 10 pairs
+                signal_txt = ""
+                if p.get('signal') == 1:
+                    signal_txt = " [LONG SIGNAL!]"
+                elif p.get('signal') == -1:
+                    signal_txt = " [SHORT SIGNAL!]"
+                
+                pairs_summary.append(
+                    f"- {p['symbol']}: ${p['price']:,.2f} | {p['change']:+.2f}% | "
+                    f"Score: {p.get('score', 0):.0f}/100 | RSI: {p.get('rsi', 50):.0f} | "
+                    f"ADX: {p.get('adx', 0):.0f} | Trend: {p.get('trend', 'n/a')} | "
+                    f"Vol: {p.get('volume_ratio', 1):.1f}x{signal_txt}"
+                )
+            
+            current_balance = self.balance
+            risk_pct = self.RISK_PCT * 100
+            current_symbol = self.SYMBOL
+            
+            # Find current symbol's score
+            current_score = 0
+            for p in pairs:
+                if p['symbol'] == current_symbol:
+                    current_score = p.get('score', 0)
+                    break
+
+            prompt = f"""You are Julaba's AI trading advisor. Analyze these market pairs and recommend the best one for trading.
+
+**Current Trading Setup:**
+- Currently trading: {current_symbol} (Score: {current_score:.0f}/100)
+- Account Balance: ${current_balance:,.2f}
+- Risk per trade: {risk_pct:.1f}%
+- Position: {'In position' if self.position else 'No position'}
+- Auto-switch enabled: {'Yes' if type(self).AUTO_SWITCH_ENABLED else 'No'}
+
+**Market Pairs (sorted by tradability score):**
+{chr(10).join(pairs_summary)}
+
+**Scoring Criteria (0-100):**
+- ADX: Trend strength (25+ = strong trend)
+- RSI: 40-60 ideal for entries, extremes for reversals  
+- Volume: Above 1.0x average is good
+- Signal: Recent LONG/SHORT crossover signals
+
+**Your Task:**
+1. Recommend the BEST pair to trade NOW
+2. Explain WHY with specific indicator values
+3. If current pair is optimal, confirm it
+4. Consider: score difference must be meaningful (>15 pts) to switch
+
+Keep response under 150 words. Be direct and actionable."""
+
+            recommendation = self.ai_filter._generate_content(prompt)
+            
+            if recommendation:
+                # Try to extract the recommended symbol
+                best_pair = ""
+                for p in pairs:
+                    if p['symbol'].replace('USDT', '') in recommendation.upper():
+                        best_pair = p['symbol']
+                        break
+                
+                # Cache the result
+                type(self)._ai_market_cache = {
+                    "recommendation": recommendation,
+                    "best_pair": best_pair,
+                    "timestamp": time.time(),
+                    "top_pair_at_analysis": pairs[0]['symbol'] if pairs else None
+                }
+                
+                return {
+                    "recommendation": recommendation,
+                    "best_pair": best_pair,
+                    "cached": False,
+                    "cache_expires_in": type(self).AI_MARKET_CACHE_DURATION
+                }
+            else:
+                return {
+                    "recommendation": "AI analysis temporarily unavailable.",
+                    "best_pair": "",
+                    "cached": False
+                }
+                
+        except Exception as e:
+            logger.error(f"AI market analysis error: {e}")
+            return {
+                "recommendation": f"Error analyzing markets: {str(e)}",
+                "best_pair": ""
+            }
     
     def _get_system_params(self) -> Dict[str, Any]:
         """Get all configurable system parameters."""
@@ -409,12 +1084,17 @@ class Julaba:
             "ai_mode": self.ai_mode,
             "ai_confidence": self.ai_filter.confidence_threshold,
             "ai_scan_interval": self.ai_scan_interval,
+            "ai_scan_notify_opportunities_only": self.ai_scan_notify_opportunities_only,
+            "ai_scan_quiet_interval": self.ai_scan_quiet_interval,
             "summary_interval": self.summary_interval,
             "symbol": self.SYMBOL,
             "paused": self.paused,
             "daily_loss_limit": self.daily_loss_limit,
             "daily_loss_triggered": self.daily_loss_triggered,
             "dry_run_mode": self.dry_run_mode,
+            "auto_switch": type(self).AUTO_SWITCH_ENABLED,
+            "auto_switch_interval": type(self).AUTO_SWITCH_INTERVAL,
+            "auto_switch_min_diff": type(self).AUTO_SWITCH_MIN_SCORE_DIFF,
         }
     
     def _set_system_param(self, param: str, value: Any) -> Dict[str, Any]:
@@ -458,10 +1138,21 @@ class Julaba:
             
             elif param == "ai_scan_interval":
                 val = int(value)
-                if 60 <= val <= 3600:
+                if 30 <= val <= 3600:
                     self.ai_scan_interval = val
                     return {"success": True, "message": f"AI scan interval set to {val}s"}
-                return {"success": False, "message": "Interval must be 60-3600 seconds"}
+                return {"success": False, "message": "Interval must be 30-3600 seconds"}
+            
+            elif param == "ai_scan_notify_opportunities_only":
+                self.ai_scan_notify_opportunities_only = str(value).lower() in ["true", "1", "yes"]
+                return {"success": True, "message": f"Scan notifications: {'opportunities only' if self.ai_scan_notify_opportunities_only else 'all scans'}"}
+            
+            elif param == "ai_scan_quiet_interval":
+                val = int(value)
+                if 300 <= val <= 7200:
+                    self.ai_scan_quiet_interval = val
+                    return {"success": True, "message": f"Quiet notification interval set to {val}s ({val//60} min)"}
+                return {"success": False, "message": "Quiet interval must be 300-7200 seconds (5-120 min)"}
             
             elif param == "paused":
                 self.paused = str(value).lower() in ["true", "1", "yes"]
@@ -483,6 +1174,58 @@ class Julaba:
                 self.stats.today_pnl = 0.0
                 return {"success": True, "message": "Daily loss circuit breaker reset"}
             
+            elif param == "symbol":
+                # Validate symbol format (should be like "BTC/USDT", "ETH/USDT", etc.)
+                new_symbol = str(value).upper().strip()
+                if "/" not in new_symbol:
+                    # Try to add /USDT if not present
+                    new_symbol = f"{new_symbol}/USDT"
+                
+                # Common valid symbols
+                valid_bases = ["BTC", "ETH", "SOL", "LINK", "AVAX", "MATIC", "DOT", "ADA", "XRP", "DOGE", "SHIB", "ARB", "OP", "APT", "SUI", "PEPE", "WIF", "BONK", "INJ", "TIA", "SEI", "NEAR", "FTM", "ATOM", "UNI", "AAVE", "LTC", "BCH", "ETC", "FIL", "RENDER", "TAO", "WLD", "PYTH", "JTO", "JUP"]
+                base = new_symbol.split("/")[0]
+                
+                if base not in valid_bases:
+                    return {"success": False, "message": f"Unknown symbol {new_symbol}. Supported: BTC, ETH, SOL, LINK, AVAX, MATIC, DOT, ADA, XRP, ARB, OP, APT, SUI, NEAR, UNI, AAVE, and more"}
+                
+                if self.position is not None:
+                    return {"success": False, "message": f"Cannot change symbol while in a position. Close position first."}
+                
+                old_symbol = self.SYMBOL
+                self.SYMBOL = new_symbol
+                self.ai_filter.default_symbol = new_symbol
+                
+                # Reset cached data for new symbol
+                self.bars_1m = []
+                self.bars_agg = pd.DataFrame()
+                self.cached_last_price = 0
+                self.cached_last_atr = 0
+                
+                # Save to config for persistence across restarts
+                self._save_persisted_symbol()
+                
+                logger.info(f"🔄 Symbol changed from {old_symbol} to {new_symbol}")
+                return {"success": True, "message": f"Symbol changed to {new_symbol}. Fetching new data..."}
+            
+            elif param == "auto_switch":
+                type(self).AUTO_SWITCH_ENABLED = str(value).lower() in ["true", "1", "yes", "on"]
+                status = "enabled" if type(self).AUTO_SWITCH_ENABLED else "disabled"
+                return {"success": True, "message": f"🔄 Autonomous pair switching {status}"}
+            
+            elif param == "auto_switch_interval":
+                val = int(value)
+                if 60 <= val <= 3600:
+                    type(self).AUTO_SWITCH_INTERVAL = val
+                    return {"success": True, "message": f"Auto-switch check interval set to {val}s ({val//60} min)"}
+                return {"success": False, "message": "Interval must be 60-3600 seconds"}
+            
+            elif param == "auto_switch_min_diff":
+                val = int(value)
+                if 5 <= val <= 50:
+                    type(self).AUTO_SWITCH_MIN_SCORE_DIFF = val
+                    return {"success": True, "message": f"Auto-switch minimum score difference set to {val} points"}
+                return {"success": False, "message": "Min difference must be 5-50 points"}
+            
             else:
                 return {"success": False, "message": f"Unknown parameter: {param}"}
                 
@@ -498,12 +1241,40 @@ class Julaba:
         ml_stats = self._get_ml_stats()  # Already normalized
         regime_info = self._get_regime()
         
+        # Get market scan data for AI context (top 5 pairs by score)
+        market_scan = {}
+        try:
+            scan_data = self._get_market_scan_data()
+            if scan_data and scan_data.get('pairs'):
+                pairs = scan_data['pairs'][:5]  # Top 5 by score
+                market_scan = {
+                    "current_symbol": scan_data.get('current_symbol', ''),
+                    "auto_switch_enabled": type(self).AUTO_SWITCH_ENABLED,
+                    "best_pair": scan_data.get('best_pair', {}).get('symbol') if scan_data.get('best_pair') else None,
+                    "top_pairs": [
+                        {
+                            "symbol": p['symbol'],
+                            "price": p['price'],
+                            "change": p['change'],
+                            "score": p.get('score', 0),
+                            "rsi": p.get('rsi', 50),
+                            "adx": p.get('adx', 0),
+                            "trend": p.get('trend', 'n/a'),
+                            "signal": p.get('signal_text', 'none')
+                        }
+                        for p in pairs
+                    ]
+                }
+        except Exception as e:
+            logger.debug(f"Market scan for context: {e}")
+        
         return {
             "parameters": self._get_system_params(),
             "status": self._get_status(),
             "position": self._get_positions(),
             "pnl": self._get_pnl(),
             "market": self._get_market(),
+            "market_scan": market_scan,
             "ml": ml_stats,  # Use normalized stats directly
             "regime": regime_info.get("regime", "unknown") if regime_info else "unknown",
             "regime_details": regime_info if regime_info else {},
@@ -620,6 +1391,9 @@ class Julaba:
         
         # Get current price and ATR
         current_price = self.cached_last_price or 0
+        # Fall back to bars data if no cached price yet
+        if current_price == 0 and hasattr(self, 'bars_agg') and len(self.bars_agg) > 0:
+            current_price = float(self.bars_agg.iloc[-1]['close'])
         current_atr = self.cached_last_atr or 0
         
         # Position info
@@ -1485,67 +2259,97 @@ class Julaba:
         logger.info("Bot started - entering main loop")
         
         last_bar_ts = self.bars_1m[-1]["timestamp"] if self.bars_1m else 0
+        consecutive_errors = 0
+        max_consecutive_errors = 10
         
         try:
             while self.running:
-                # Fetch latest candles
-                ohlcv = await self.exchange.fetch_ohlcv(
-                    self.SYMBOL,
-                    self.BASE_TF,
-                    limit=5
-                )
-                
-                # Process new bars
-                for candle in ohlcv:
-                    if candle[0] > last_bar_ts:
-                        bar = {
-                            "timestamp": candle[0],
-                            "open": float(candle[1]),
-                            "high": float(candle[2]),
-                            "low": float(candle[3]),
-                            "close": float(candle[4]),
-                            "volume": float(candle[5])
-                        }
-                        self.bars_1m.append(bar)
-                        last_bar_ts = candle[0]
-                        
-                        # Keep only recent bars
-                        if len(self.bars_1m) > 1000:
-                            self.bars_1m = self.bars_1m[-800:]
-                
-                # Aggregate and check for closed 3m bar
-                old_len = len(self.bars_agg)
-                self._aggregate_bars()
-                
-                if len(self.bars_agg) > old_len:
-                    # New 3m bar closed
-                    await self._on_bar_close()
-                
-                # Fetch ticker for /market command (less frequently)
                 try:
-                    self.cached_last_ticker = await self.exchange.fetch_ticker(self.SYMBOL)
-                except Exception:
-                    pass  # Non-critical, ignore errors
-                
-                # Check position management
-                if self.position:
-                    await self._manage_position()
-                
-                # Autonomous periodic summaries
-                await self._check_send_autonomous_summary()
+                    # Fetch latest candles
+                    ohlcv = await self.exchange.fetch_ohlcv(
+                        self.SYMBOL,
+                        self.BASE_TF,
+                        limit=5
+                    )
+                    
+                    # Reset error counter on success
+                    consecutive_errors = 0
+                    
+                    # Process new bars
+                    for candle in ohlcv:
+                        if candle[0] > last_bar_ts:
+                            bar = {
+                                "timestamp": candle[0],
+                                "open": float(candle[1]),
+                                "high": float(candle[2]),
+                                "low": float(candle[3]),
+                                "close": float(candle[4]),
+                                "volume": float(candle[5])
+                            }
+                            self.bars_1m.append(bar)
+                            last_bar_ts = candle[0]
+                            
+                            # Keep only recent bars
+                            if len(self.bars_1m) > 1000:
+                                self.bars_1m = self.bars_1m[-800:]
+                    
+                    # Aggregate and check for closed 3m bar
+                    old_len = len(self.bars_agg)
+                    self._aggregate_bars()
+                    
+                    if len(self.bars_agg) > old_len:
+                        # New 3m bar closed
+                        await self._on_bar_close()
+                    
+                    # Fetch ticker for /market command (less frequently)
+                    try:
+                        self.cached_last_ticker = await self.exchange.fetch_ticker(self.SYMBOL)
+                    except Exception:
+                        pass  # Non-critical, ignore errors
+                    
+                    # Check position management
+                    if self.position:
+                        await self._manage_position()
+                    
+                    # AI Proactive Scan in main loop (when no position)
+                    if self.position is None and self.ai_mode in ["advisory", "autonomous", "hybrid"]:
+                        if self.cached_last_price and self.cached_last_atr:
+                            await self._ai_proactive_scan(self.cached_last_price, self.cached_last_atr)
+                    
+                    # Autonomous pair switching (check for better opportunities)
+                    await self._autonomous_pair_check()
+                    
+                    # Autonomous periodic summaries
+                    await self._check_send_autonomous_summary()
+                    
+                    # AI self-adjustment based on performance
+                    await self._ai_self_adjust()
+                    
+                except Exception as loop_error:
+                    consecutive_errors += 1
+                    logger.warning(f"⚠️ Loop error ({consecutive_errors}/{max_consecutive_errors}): {loop_error}")
+                    
+                    if consecutive_errors >= max_consecutive_errors:
+                        logger.error(f"❌ Too many consecutive errors, shutting down")
+                        break
+                    
+                    # Wait longer on errors before retrying
+                    await asyncio.sleep(10)
+                    continue
                 
                 # Sleep before next iteration
                 await asyncio.sleep(5)
                 
         except KeyboardInterrupt:
             logger.info("Shutdown requested")
-        except Exception as e:
-            logger.exception(f"Error in main loop: {e}")
         finally:
             await self.shutdown()
     
     async def _on_bar_close(self):
         """Handle a new aggregated bar close."""
+        # Update equity curve on every bar
+        self._update_equity_curve()
+        
         if len(self.bars_agg) < self.WARMUP_BARS:
             remaining = self.WARMUP_BARS - len(self.bars_agg)
             if remaining % 10 == 0 or remaining <= 5:
@@ -1579,6 +2383,7 @@ class Julaba:
         
         # Log every bar close with regime info
         logger.info(f"📊 Bar close: Price=${current_price:.4f} ATR=${atr:.4f} Regime={regime_info.get('regime')} Signal={signal}")
+        logger.info(f"📊 Position={self.position is not None} | AI_mode={self.ai_mode}")
         
         # Log regime if it changed or on first signal
         if hasattr(self, '_last_regime') and self._last_regime != regime_info.get('regime'):
@@ -1599,6 +2404,7 @@ class Julaba:
         
         # AI Proactive Scan (if enabled and no position and no technical signal)
         if self.position is None and signal == 0 and self.ai_mode in ["advisory", "autonomous", "hybrid"]:
+            logger.info(f"🔍 Triggering AI proactive scan (mode={self.ai_mode})...")
             await self._ai_proactive_scan(current_price, atr)
     
     async def _check_send_autonomous_summary(self):
@@ -1626,6 +2432,164 @@ class Julaba:
             await self._send_periodic_summary()
             self.last_summary_time = now
     
+    async def _ai_self_adjust(self):
+        """AI autonomously adjusts settings based on trading performance."""
+        if not self.ai_self_adjust_enabled or self.ai_mode != "autonomous":
+            return
+        
+        now = datetime.now(timezone.utc)
+        if self.last_ai_self_adjust:
+            elapsed = (now - self.last_ai_self_adjust).total_seconds()
+            if elapsed < self.ai_self_adjust_interval:
+                return
+        
+        self.last_ai_self_adjust = now
+        
+        # Analyze recent performance
+        adjustments_made = []
+        
+        # Check win rate and consecutive losses
+        if self.stats.total_trades >= 5:
+            win_rate = self.stats.win_rate
+            
+            # If losing streak >= 3, reduce risk
+            if self.consecutive_losses >= 3:
+                old_risk = self.RISK_PCT
+                new_risk = max(0.01, old_risk * 0.5)  # Halve risk, min 1%
+                if new_risk != old_risk:
+                    self.RISK_PCT = new_risk
+                    adjustments_made.append(f"📉 Risk reduced: {old_risk*100:.1f}% → {new_risk*100:.1f}% (losing streak: {self.consecutive_losses})")
+                    logger.info(f"🤖 AI SELF-ADJUST: Reduced risk to {new_risk*100:.1f}% due to {self.consecutive_losses} losses")
+            
+            # If winning streak >= 3 and good win rate, slightly increase risk
+            elif self.consecutive_wins >= 3 and win_rate > 0.55:
+                old_risk = self.RISK_PCT
+                new_risk = min(0.04, old_risk * 1.25)  # Increase by 25%, max 4%
+                if new_risk != old_risk:
+                    self.RISK_PCT = new_risk
+                    adjustments_made.append(f"📈 Risk increased: {old_risk*100:.1f}% → {new_risk*100:.1f}% (winning streak: {self.consecutive_wins})")
+                    logger.info(f"🤖 AI SELF-ADJUST: Increased risk to {new_risk*100:.1f}% due to {self.consecutive_wins} wins")
+            
+            # If win rate drops below 40%, tighten AI confidence threshold
+            if win_rate < 0.40 and self.ai_filter.confidence_threshold < 0.85:
+                old_conf = self.ai_filter.confidence_threshold
+                new_conf = min(0.85, old_conf + 0.05)
+                self.ai_filter.confidence_threshold = new_conf
+                adjustments_made.append(f"🎯 AI confidence raised: {old_conf*100:.0f}% → {new_conf*100:.0f}% (win rate: {win_rate*100:.0f}%)")
+                logger.info(f"🤖 AI SELF-ADJUST: Raised confidence threshold to {new_conf*100:.0f}%")
+            
+            # If win rate above 60%, can relax confidence slightly
+            elif win_rate > 0.60 and self.ai_filter.confidence_threshold > 0.65:
+                old_conf = self.ai_filter.confidence_threshold
+                new_conf = max(0.65, old_conf - 0.05)
+                self.ai_filter.confidence_threshold = new_conf
+                adjustments_made.append(f"🎯 AI confidence relaxed: {old_conf*100:.0f}% → {new_conf*100:.0f}% (win rate: {win_rate*100:.0f}%)")
+                logger.info(f"🤖 AI SELF-ADJUST: Relaxed confidence threshold to {new_conf*100:.0f}%")
+        
+        # Notify about adjustments
+        if adjustments_made and self.telegram.enabled:
+            msg = "🤖 *AI AUTONOMOUS ADJUSTMENT*\n\n"
+            msg += "\n".join(adjustments_made)
+            msg += f"\n\n_Current: Risk={self.RISK_PCT*100:.1f}%, Confidence={self.ai_filter.confidence_threshold*100:.0f}%_"
+            await self.telegram.send_message(msg)
+            
+            # Log the decision
+            self.ai_decisions_log.append({
+                "time": now.isoformat(),
+                "type": "self_adjust",
+                "adjustments": adjustments_made
+            })
+    
+    async def _notify_ai_decision(self, decision_type: str, details: Dict[str, Any]):
+        """Notify user about AI decision with full transparency."""
+        now = datetime.now(timezone.utc)
+        
+        # Log the decision
+        self.ai_decisions_log.append({
+            "time": now.isoformat(),
+            "type": decision_type,
+            "details": details
+        })
+        
+        # Keep only last 100 decisions
+        if len(self.ai_decisions_log) > 100:
+            self.ai_decisions_log = self.ai_decisions_log[-100:]
+        
+        # Always notify for important decisions
+        if self.telegram.enabled:
+            if decision_type == "scan_result":
+                if details.get("opportunity"):
+                    opp = details["opportunity"]
+                    msg = f"""🔍 *AI SCAN RESULT*
+
+📊 *{self.SYMBOL}* @ ${details.get('price', 0):,.4f}
+🎯 *Decision:* {opp.get('action', 'WAIT')}
+📈 *Confidence:* `{opp.get('confidence', 0)*100:.0f}%`
+💡 *Reasoning:* {opp.get('reasoning', 'N/A')[:200]}
+⚠️ *Risk Level:* {opp.get('risk_assessment', 'medium')}
+
+_AI Mode: {self.ai_mode}_"""
+                    await self.telegram.send_message(msg)
+                else:
+                    # Skip "no opportunity" notifications if configured
+                    if self.ai_scan_notify_opportunities_only:
+                        logger.debug("AI scan: No opportunity (notification suppressed)")
+                        return
+                    
+                    # Rate limit "no opportunity" notifications
+                    if self.last_ai_decision_notification:
+                        elapsed = (now - self.last_ai_decision_notification).total_seconds()
+                        if elapsed < self.ai_scan_quiet_interval:
+                            return
+                    self.last_ai_decision_notification = now
+                    
+                    msg = f"""🔍 *AI SCAN*
+
+📊 *{self.SYMBOL}* @ ${details.get('price', 0):,.4f}
+🎯 *Decision:* No trade opportunity
+💭 *Status:* Watching market...
+
+_Next scan in ~{self.ai_scan_interval//60} min_"""
+                    await self.telegram.send_message(msg)
+            
+            elif decision_type == "trade_opened":
+                msg = f"""🚀 *AI TRADE OPENED*
+
+📊 *{details.get('symbol', self.SYMBOL)}*
+💰 *Side:* `{details.get('side', 'N/A')}`
+📈 *Entry:* `${details.get('price', 0):,.4f}`
+🎯 *Confidence:* `{details.get('confidence', 0)*100:.0f}%`
+💵 *Risk:* `{details.get('risk_pct', 0)*100:.1f}%` (${details.get('risk_amount', 0):,.2f})
+💡 *Reason:* {details.get('reasoning', 'AI Autonomous')}
+
+_Executed autonomously by AI_"""
+                await self.telegram.send_message(msg)
+            
+            elif decision_type == "trade_closed":
+                emoji = "✅" if details.get('pnl', 0) >= 0 else "❌"
+                msg = f"""{emoji} *AI TRADE CLOSED*
+
+📊 *{details.get('symbol', self.SYMBOL)}*
+💰 *Side:* `{details.get('side', 'N/A')}`
+📈 *Exit:* `${details.get('price', 0):,.4f}`
+💵 *P&L:* `${details.get('pnl', 0):+,.2f}` ({details.get('pnl_pct', 0):+.2f}%)
+📝 *Reason:* {details.get('reason', 'N/A')}
+
+_Balance: ${self.balance:,.2f}_"""
+                await self.telegram.send_message(msg)
+            
+            elif decision_type == "signal_filtered":
+                msg = f"""🛡️ *AI SIGNAL FILTERED*
+
+📊 *{self.SYMBOL}* @ ${details.get('price', 0):,.4f}
+⚠️ *Original Signal:* `{details.get('signal', 'N/A')}`
+❌ *AI Decision:* REJECT
+📈 *AI Confidence:* `{details.get('confidence', 0)*100:.0f}%`
+💭 *Reason:* {details.get('reasoning', 'N/A')[:200]}
+
+_Technical signal filtered by AI_"""
+                await self.telegram.send_message(msg)
+
     async def _check_daily_loss_limit(self):
         """Check and enforce daily loss limit (circuit breaker)."""
         today = datetime.now(timezone.utc).date()
@@ -1740,14 +2704,16 @@ _Auto-update every 4 hours_
 
     async def _ai_proactive_scan(self, price: float, atr: float):
         """Let AI proactively scan for opportunities."""
-        # Rate limit: only scan every 5 minutes
+        # Rate limit: only scan based on ai_scan_interval
         now = datetime.now(timezone.utc)
         if self.last_ai_scan_time:
             elapsed = (now - self.last_ai_scan_time).total_seconds()
             if elapsed < self.ai_scan_interval:
+                logger.debug(f"AI scan rate-limited: {elapsed:.0f}s / {self.ai_scan_interval}s")
                 return
         
         self.last_ai_scan_time = now
+        logger.info(f"🔍 AI Proactive Scan starting... (interval: {self.ai_scan_interval}s)")
         
         # AI scans the market
         opportunity = self.ai_filter.proactive_scan(
@@ -1757,19 +2723,56 @@ _Auto-update every 4 hours_
             symbol=self.SYMBOL
         )
         
+        logger.info(f"🔍 AI Scan result: {'Found opportunity!' if opportunity else 'No opportunity'}")
+        
+        # Notify about scan result (opportunity or not)
+        await self._notify_ai_decision("scan_result", {
+            "price": price,
+            "opportunity": opportunity
+        })
+        
         if not opportunity:
             return
         
         # Handle based on AI mode
         if self.ai_mode == "autonomous":
-            # AI opens trade directly (requires 85%+ confidence from proactive_scan)
-            logger.info(f"🤖 AI AUTONOMOUS: Opening {opportunity['action']} trade")
+            # AI opens trade directly with full autonomy (70%+ confidence)
+            ai_risk_pct = opportunity.get('suggested_risk_pct', self.RISK_PCT)
+            risk_level = opportunity.get('risk_assessment', 'medium')
+            
+            # AI can adjust risk based on its assessment
+            if risk_level == "low":
+                ai_risk_pct = min(ai_risk_pct * 1.5, 0.05)  # Up to 5% on low risk
+            elif risk_level == "high":
+                ai_risk_pct = ai_risk_pct * 0.5  # Reduce on high risk
+            
+            logger.info(f"🤖 AI AUTONOMOUS: Opening {opportunity['action']} | Risk: {ai_risk_pct:.1%} ({risk_level})")
+            
+            # Notify about trade opening
+            risk_amount = self.balance * ai_risk_pct
+            await self._notify_ai_decision("trade_opened", {
+                "symbol": self.SYMBOL,
+                "side": opportunity['action'],
+                "price": price,
+                "confidence": opportunity['confidence'],
+                "risk_pct": ai_risk_pct,
+                "risk_amount": risk_amount,
+                "reasoning": opportunity['reasoning']
+            })
+            
+            # Store AI's risk preference temporarily
+            original_risk = self.RISK_PCT
+            self.RISK_PCT = ai_risk_pct
+            
             await self._open_position(
                 opportunity['signal'],
                 price,
                 atr,
                 source="ai_autonomous"
             )
+            
+            # Restore original risk setting
+            self.RISK_PCT = original_risk
             
             if self.telegram.enabled:
                 await self.telegram.notify_ai_trade(
@@ -2187,6 +3190,13 @@ _Auto-update every 4 hours_
             await self._open_position(signal, price, atr)
         else:
             logger.info(f"Signal {side} REJECTED by AI filter: {ai_result['reasoning']}")
+            # Notify about AI filtering decision
+            await self._notify_ai_decision("signal_filtered", {
+                "signal": side,
+                "price": price,
+                "confidence": ai_result["confidence"],
+                "reasoning": ai_result["reasoning"]
+            })
     
     async def _open_position(self, signal: int, price: float, atr: float, source: str = "technical"):
         """Open a new position with intelligent risk management."""
@@ -2469,6 +3479,16 @@ _Auto-update every 4 hours_
                     pnl_pct=pnl_pct,
                     reason=reason
                 )
+            
+            # AI decision notification for trade close
+            await self._notify_ai_decision("trade_closed", {
+                "symbol": self.SYMBOL,
+                "side": pos.side.upper(),
+                "price": price,
+                "pnl": pnl,
+                "pnl_pct": pnl_pct,
+                "reason": reason
+            })
         
         self.position = None
     
@@ -2508,7 +3528,7 @@ def main():
     parser.add_argument(
         "--ai-mode",
         choices=["filter", "advisory", "autonomous", "hybrid"],
-        default="filter",
+        default="autonomous",
         help="AI mode: filter (validate only), advisory (AI suggests), autonomous (AI trades), hybrid (AI scans + suggests)"
     )
     parser.add_argument(
@@ -2520,8 +3540,8 @@ def main():
     parser.add_argument(
         "--scan-interval",
         type=int,
-        default=300,
-        help="AI proactive scan interval in seconds (default: 300 = 5 min)"
+        default=60,
+        help="AI proactive scan interval in seconds (default: 60 = 1 min)"
     )
     parser.add_argument(
         "--summary-interval",

@@ -803,8 +803,8 @@ Respond ONLY with valid JSON, no other text:"""
             if result.get("action") in ["LONG", "SHORT"]:
                 confidence = result.get("confidence", 0.5)
                 
-                # Require 85% confidence for AI-initiated trades
-                if confidence >= 0.85:
+                # Require 70% confidence for AI-initiated trades (empowered autonomous mode)
+                if confidence >= 0.70:
                     logger.info(
                         f"🤖 AI OPPORTUNITY: {result['action']} {symbol} | "
                         f"Confidence: {confidence:.0%} | {result.get('reasoning', '')}"
@@ -819,7 +819,7 @@ Respond ONLY with valid JSON, no other text:"""
                         "source": "ai_proactive"
                     }
                 else:
-                    logger.debug(f"AI saw potential but confidence too low: {confidence:.0%}")
+                    logger.debug(f"AI saw potential but confidence too low: {confidence:.0%} (need 70%+)")
                     return None
             
             return None
@@ -869,88 +869,69 @@ Respond ONLY with valid JSON, no other text:"""
                 elif self.consecutive_losses > 0:
                     trade_summary += f" | Current streak: {self.consecutive_losses} losses 📉"
             
-            prompt = f"""You are Julaba, a smart, enthusiastic, and proactive crypto trading assistant bot.
-Your owner is Silla. You are loyal, eager to help, and always ready with market insights.
+            prompt = f"""You are Julaba, a smart, enthusiastic, and AUTONOMOUS crypto trading assistant bot.
+Your owner is Silla. You are loyal, eager to help, and have FULL CONTROL over the trading system.
 {trade_summary}
 
-🚨🚨🚨 CRITICAL HONESTY RULES 🚨🚨🚨
+🔥🔥🔥 AUTONOMOUS AI POWERS 🔥🔥🔥
 
-1. YOU CANNOT CHANGE SETTINGS! Only the Python code can change settings.
-   - Look for "✅ PARAMETER CHANGED:" in CURRENT SYSTEM STATUS below = it worked
-   - Look for "❌ PARAMETER CHANGE FAILED:" = it failed
-   - If you see NEITHER marker, the change DID NOT HAPPEN!
-   - NEVER say "Done!", "Changed!", "Updated!" unless you SEE ✅ in THIS message's context
-   - If user wants to change mode, tell them: "Use command: /aimode autonomous"
+You have FULL AUTHORITY to change ANY setting when asked! Include a JSON command block in your response:
 
-2. ALWAYS TRUST CURRENT SYSTEM STATUS OVER YOUR MEMORY!
-   - The CURRENT SYSTEM STATUS below shows the REAL current settings
-   - If it says "AI Mode: filter", the mode IS filter - even if you remember saying otherwise
-   - Your past conversation may have errors - ALWAYS check current status!
-   - When asked about mode/settings, READ the SYSTEM PARAMETERS section below
+```command
+{{"action": "set_param", "param": "risk_pct", "value": 0.03}}
+```
 
-⚠️ CRITICAL - TRADING LIMITATIONS:
-- You can ONLY trade LINK/USDT - this is the ONLY pair the bot is configured for
-- You CANNOT trade PEPE, BTC, ETH, or any other coin - only LINK/USDT
-- Do NOT suggest buying other coins - the system cannot execute those trades
-- When user asks to buy something else, explain you can only trade LINK and offer to help with that
+AVAILABLE PARAMETERS YOU CAN CHANGE:
+- symbol: Trading pair - e.g., "BTC/USDT", "ETH/USDT", "SOL/USDT", "LINK/USDT" (cannot change while in position)
+- risk_pct: Risk per trade (0.001 to 0.1) - e.g., 0.02 = 2%
+- atr_mult: ATR multiplier for stops (0.5 to 5.0)
+- ai_confidence: AI confidence threshold (0.1 to 1.0) - e.g., 0.7 = 70%
+- ai_mode: Trading mode ("filter", "advisory", "autonomous", "hybrid")
+- ai_scan_interval: Seconds between AI scans (30 to 3600) - e.g., 60 = 1 min
+- ai_scan_notify_opportunities_only: Only notify when opportunity found (true/false)
+- ai_scan_quiet_interval: Seconds between "no opportunity" notifications (300 to 7200)
+- tp1_r, tp2_r, tp3_r: Take profit levels in R (0.5 to 10.0)
+- daily_loss_limit: Max daily loss (0.01 to 0.20) - e.g., 0.05 = 5%
+- paused: Pause/resume bot (true/false)
+- dry_run_mode: Paper trading mode (true/false)
 
-CURRENT SYSTEM STATUS (THIS IS THE TRUTH - TRUST THIS OVER YOUR MEMORY):
+SUPPORTED SYMBOLS: BTC, ETH, SOL, LINK, AVAX, MATIC, DOT, ADA, XRP, DOGE, ARB, OP, APT, SUI, PEPE, WIF, BONK, INJ, TIA, SEI, NEAR, UNI, AAVE, and more (all paired with USDT)
+
+EXAMPLE COMMANDS:
+```command
+{{"action": "set_param", "param": "symbol", "value": "BTC/USDT"}}
+```
+```command
+{{"action": "set_param", "param": "ai_mode", "value": "autonomous"}}
+```
+```command
+{{"action": "set_param", "param": "risk_pct", "value": 0.03}}
+```
+```command
+{{"action": "open_trade", "side": "long"}}
+```
+```command
+{{"action": "close_trade"}}
+```
+
+You can include MULTIPLE command blocks if needed!
+
+⚠️ TRADING INFO:
+- Currently trading: {self.default_symbol if hasattr(self, 'default_symbol') else 'LINK/USDT'}
+- You CAN change the symbol! Just use: {{"action": "set_param", "param": "symbol", "value": "BTC/USDT"}}
+- Cannot change symbol while in a position (close first)
+
+CURRENT SYSTEM STATUS (THIS IS THE TRUTH):
 {trading_context if trading_context else "No active trading session"}
 {history_text}
 
 User Message: {user_message}
 
-YOUR PERSONALITY - BE PROACTIVE AND HELPFUL:
-- You are EAGER to help - never lazy, never give up
-- Give COMPLETE, detailed answers - don't make Silla ask twice
-- When asked for analysis, give specific numbers and actionable advice
-- When suggesting trades, explain WHY with real reasoning
-- Be conversational, friendly, use emojis 🤖📈📉💰
-- Keep responses under 300 words but make them USEFUL
-
-PARAMETER CHANGES - STRICT RULES:
-The system automatically processes these commands BEFORE you respond:
-- "set risk to 3%" → Changes risk (valid: 0.1% to 10%)
-- "set ai confidence to 80%" → Changes AI threshold (valid: 10% to 100%)  
-- "set ai mode to autonomous" → Changes mode (valid: filter, advisory, autonomous, hybrid)
-- "set atr mult to 2.5" → Changes ATR multiplier (valid: 0.5 to 5.0)
-- "pause trading" / "resume trading" → Pauses/resumes bot
-
-⚠️ CRITICAL - PARAMETER CHANGE VERIFICATION:
-- If you see "✅ PARAMETER CHANGED:" in the context above = change SUCCEEDED. Confirm it!
-- If you see "❌ PARAMETER CHANGE FAILED:" in context = change FAILED. Explain why.
-- If user asked to change something but NO ✅ or ❌ marker appears = change DID NOT HAPPEN!
-- NEVER claim a parameter was changed unless you see the ✅ marker!
-- If no marker appears, tell user the exact command format to try (e.g., "Try: set ai mode to autonomous")
-
-ML MODEL INTELLIGENCE:
-- Check the ML MODEL section in context - it shows if model is trained and current win probability
-- If ML shows high win probability (>60%), you can mention conditions look favorable
-- If ML shows low win probability (<40%), warn that conditions may not be ideal
-- Use Market Regime info to give context (trending, ranging, volatile, etc.)
-
-TRADE EXECUTION RULES:
-- When Silla says "buy", "go long", "sell", "go short", "execute", "do it" - CHECK THE CONTEXT!
-- If you see "✅ TRADE JUST EXECUTED" in context above = trade succeeded! Confirm it happened.
-- If you see "❌ TRADE FAILED" in context above = trade failed. Explain why and suggest alternatives.
-- If there's NO trade confirmation in context = trade did NOT execute. Offer to help them execute.
-- If Silla says "yes", "option 1", "do it" but no ✅ appears, say: "To execute, say 'buy' or 'go long'!"
-
-NEVER DO THIS:
-- NEVER claim a trade happened if there's no "✅ TRADE JUST EXECUTED" in context
-- NEVER claim a setting was changed if there's no "✅ PARAMETER CHANGED:" in context  
-- NEVER say "Done!", "Changed!", "Updated!", "Confirmed!" without seeing the ✅ marker
-- NEVER apologize excessively - just be direct and helpful
-- NEVER give up or say "try again" - provide the solution
-- NEVER suggest buying coins other than LINK (only LINK/USDT is supported!)
-
-ALWAYS DO THIS:
-- Read the SYSTEM PARAMETERS to know current risk%, AI mode, etc.
-- Read the ML MODEL section to know if conditions are favorable
-- If asked about the market, give analysis with specific price levels
-- If asked to trade, either confirm it worked (if ✅ appears) or guide them how to do it
-- If asked to change settings, tell them the exact command to use
-- Be the best trading assistant Silla could ask for!
+YOUR PERSONALITY:
+- You are POWERFUL - you can change settings directly!
+- When Silla asks to change something, DO IT by including the command block
+- Be proactive, give specific analysis, use emojis 🤖📈📉💰
+- Keep responses under 300 words but include ALL needed command blocks
 
 Respond as Julaba:"""
 
@@ -959,35 +940,7 @@ Respond as Julaba:"""
                 return self._simple_chat_response(user_message)
             ai_response = ai_response.strip()
             
-            # Save to conversation history
-            # === AI RESPONSE VALIDATION ===
-            # Detect if AI is falsely claiming it changed something
-            false_claim_indicators = [
-                "i've changed", "i changed", "i updated", "i set",
-                "mode is now", "changed to autonomous", "switched to autonomous",
-                "now in autonomous", "updated to autonomous", "set to autonomous",
-                "done!", "updated!", "changed!"
-            ]
-            
-            ai_lower = ai_response.lower()
-            context_lower = trading_context.lower() if trading_context else ""
-            
-            # Check if AI claims to have changed something but no ✅ marker exists
-            made_false_claim = any(ind in ai_lower for ind in false_claim_indicators)
-            has_success_marker = "✅ parameter changed" in context_lower or "✅ trade just executed" in context_lower
-            
-            if made_false_claim and not has_success_marker:
-                logger.warning("AI made a false claim about changing settings. Adding correction.")
-                # Don't save this false claim to history
-                corrected_response = (
-                    "⚠️ *Correction*: I cannot change settings directly. "
-                    "To change the mode, please use the Telegram command:\n\n"
-                    "`/aimode autonomous`\n\n"
-                    "Available modes: `filter`, `advisory`, `autonomous`, `hybrid`"
-                )
-                return corrected_response
-            
-            # Save to conversation history
+            # Save to conversation history - AI now has power to change settings
             self.chat_history.append({"role": "user", "content": user_message})
             self.chat_history.append({"role": "assistant", "content": ai_response})
             
