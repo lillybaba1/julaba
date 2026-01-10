@@ -2453,6 +2453,8 @@ DASHBOARD_HTML = """
                             sym = sym.replace('USDT', '/USDT');
                         }
                         chartSymbol.textContent = sym;
+                        // Keep global currentSymbol in sync
+                        currentSymbol = data.status.symbol;
                     }
                 }
                 
@@ -3101,6 +3103,20 @@ fetch('/api/data')
                 logger.error(f"Dashboard API error: {e}")
                 data['error'] = str(e)
             
+            return jsonify(data)
+        
+        @self.app.route('/api/state')
+        def api_state():
+            """Unified system state - SINGLE SOURCE OF TRUTH for all components."""
+            data = {}
+            try:
+                if self.get_full_state:
+                    data = self.get_full_state()
+                else:
+                    data['error'] = 'Full state not available'
+            except Exception as e:
+                logger.error(f"Dashboard state API error: {e}")
+                data['error'] = str(e)
             return jsonify(data)
         
         @self.app.route('/api/ohlc')

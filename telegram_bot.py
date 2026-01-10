@@ -1249,10 +1249,10 @@ Example: `/aimode advisory`""",
                 # Market Scan - Top pairs by volatility
                 market_scan = full_state.get('market_scan', {})
                 if market_scan.get('top_pairs'):
-                    context_info += f"MARKET SCANNER (top by volatility):\n"
+                    context_info += f"MARKET SCANNER (top by score):\n"
                     context_info += f"  Currently trading: {market_scan.get('current_symbol', 'N/A')}\n"
                     for p in market_scan.get('top_pairs', []):
-                        context_info += f"  • {p['symbol']}: ${p['price']:,.2f} ({p['change']:+.1f}%, {p['volatility']:.1f}% vol)\n"
+                        context_info += f"  • {p['symbol']}: ${p['price']:,.2f} | Score:{p.get('score',0):.0f} | RSI:{p.get('rsi',50):.0f} | {p.get('trend','n/a')}\n"
                     context_info += "\n"
                 
                 # Recent signals

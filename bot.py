@@ -446,6 +446,8 @@ class Julaba:
         self.dashboard.get_market_scan = self._get_market_scan_data
         self.dashboard.switch_symbol = self._switch_trading_symbol
         self.dashboard.ai_analyze_markets = self._ai_analyze_all_markets
+        # Unified system state (single source of truth)
+        self.dashboard.get_full_state = self._get_full_system_state
     
     def _get_ai_explanation_for_dashboard(self, topic: str, display_name: str) -> str:
         """Get AI explanation for a dashboard topic."""
@@ -1257,6 +1259,7 @@ Keep response under 150 words. Be direct and actionable."""
                             "symbol": p['symbol'],
                             "price": p['price'],
                             "change": p['change'],
+                            "volatility": p.get('volatility', 0),
                             "score": p.get('score', 0),
                             "rsi": p.get('rsi', 50),
                             "adx": p.get('adx', 0),
